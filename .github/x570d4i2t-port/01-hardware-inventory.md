@@ -170,6 +170,108 @@ others = 0. No physical FAN4-FAN16.
 |---|---|---|
 | 56 | NVME HDD | NVMe MI sideband over SMBus, via PCA9545 mux on i2c4 (M.2 slot) |
 
+## PCIe topology (from BIOS device-path templates)
+
+Extracted from the AMI BIOS P2.50 image — these are the actual device-path
+templates the BIOS hardcodes for boot enumeration. See
+[07-bios-internals.md](07-bios-internals.md) for the full BIOS-internals
+mining writeup.
+
+### CPU PCIe roots (24 Gen4 lanes from Ryzen)
+
+- `Pci(0x1,0x1)` → NVMe target → likely **M2_1** (first M.2 socket, "Slot 2" in BIOS strings)
+- `Pci(0x1,0x6)` → NVMe target → likely **M2_2** (second M.2 socket, "Slot 3" in BIOS strings)
+- `Pci(0x2,0x1)` → NVMe target → an additional slot (PCIE7 or one of the OCuLinks in PCIe mode)
+- `Pci(0x1,0x2)` → **CPU↔X570 chipset uplink** (also where the BMC's USB-NCM endpoint shows up in SMBIOS via `.../Pci(0x8,0x0)/Pci(0x0,0x3)/USB(0x4,0x0)/USB(0x2,0x1)`)
+
+### Through the X570 chipset (downstream of `Pci(0x1,0x2)`)
+
+- `Pci(0x9,0x0)/Pci(0x0,0x0)` — FCH primary AHCI: SATA ports 0..7
+- `Pci(0x8,0x2)/Pci(0x0,0x0)` — FCH secondary AHCI: OCU1 in SATA mode
+- `Pci(0x8,0x3)/Pci(0x0,0x0)` — FCH tertiary AHCI: OCU2 in SATA mode
+- `Pci(0x8,0x0)/Pci(0x0,0x3)` — chipset xHCI controller (4 USB root ports)
+- `Pci(0x14,0x1)` — FCH SMBus host (host-side, not BMC-visible)
+
+### BIOS-controlled slot routing
+
+| BIOS attr | Setting | Default | Effect |
+|---|---|---|---|
+| `CHIPSET007` | OCU1 Mode | PCIE | OCuLink #1 = NVMe (PCIe x4) |
+| `CHIPSET008` | OCU2 Mode | PCIE | OCuLink #2 = NVMe (PCIe x4) |
+| `CHIPSET005`/`006` | X550 LAN1/2 | Enabled | dual 10GbE active |
+| `BFOL000`/`001` | Boot from X550 | Disabled | UEFI PXE off by default |
+
+## Slot and connector inventory (from BIOS Setup IFR)
+
+Extracted from the AMI BIOS P2.50 firmware's UEFI HII Setup JSON
+(`file-110dc5d3-ed94-49c1-9f2d-13e129ba22f4/section0.raw`, ~205 KB, plaintext
+JSON inside the AMI inner FFS volume). All slot designations below are the
+*actual silkscreen / SMBIOS labels* used on the board.
+
+### PCIe / M.2 / OCuLink
+
+| Designation | Type | Lanes | Source | BIOS bifurcation control |
+|---|---|---|---|---|
+| `PCIE7` | PCIe x16 slot | x16 / x8 / x4×4 | CPU (Ryzen) | `PCIE7_1`..`PCIE7_4` — 4×4 split for AIC-NVMe |
+| `M2_1` | M.2 socket | x4 PCIe **or** SATA | CPU/FCH (mode switch) | `M2_1 Slot OpROM` |
+| `M2_2` | M.2 socket | x4 PCIe **or** SATA | CPU/FCH (mode switch) | `M2_2 Slot OpROM` |
+| `OCU1` | OCuLink connector | x4 PCIe **or** 4× SATA | FCH | `OCU1 Mode Selection` (PCIE / SATA) |
+| `OCU2` | OCuLink connector | x4 PCIe **or** 4× SATA | FCH | `OCU2 Mode Selection` (PCIE / SATA) |
+
+> The two OCuLink connectors are a server-board feature — each can deliver
+> either one NVMe drive (PCIe ×4) or up to four SATA drives. Combined with
+> the FCH SATA controller, this yields the **8 SATA ports** (Port 0..7) seen
+> in BIOS Setup. The `ESATA Port On Port N` options indicate every SATA port
+> can be hot-plug enabled.
+
+### Onboard networking
+
+| Designation | Chip | BIOS attribute | Notes |
+|---|---|---|---|
+| `LAN1` | Intel X550-AT2 port 1 | `Onboard X550 LAN1` | 10GbE; PCIe asset tag `X550_3_4` (chipset lanes 3-4) |
+| `LAN2` | Intel X550-AT2 port 2 | `Onboard X550 LAN2` | 10GbE; shares the X550-AT2 chip with LAN1 |
+| `MGMT` | Realtek RTL8211E | n/a (BMC only) | dedicated 1GbE management PHY on BMC's mac0 (RGMII) |
+
+The X550-AT2 is one physical chip with two SerDes interfaces. BMC NC-SI
+sideband terminates at one of these X550 ports — selecting via
+`/api/settings/ncsi/mode` chooses which.
+
+### TPM
+
+The TPM source is configurable via BIOS attribute `PSP001` (Setup display
+"SPI/LPC/fTPM TPM switch"):
+
+| Value | Mode | Use case |
+|---|---|---|
+| 0 | AMD CPU fTPM | firmware TPM via AMD PSP |
+| 1 (default) | LPC TPM | discrete TPM module on LPC header |
+| 2 | SPI TPM | discrete TPM module on SPI header |
+
+The board therefore has both an **LPC TPM header** and an **SPI TPM header**.
+
+### DIMM slots
+
+`DDR4_A1`, `DDR4_A2`, `DDR4_B1`, `DDR4_B2` (2 DPC dual-channel UDIMM ECC).
+Naming matches what the live BMC's Redfish memory inventory reported.
+
+### Fan headers
+
+The BIOS exposes **no** fan-related options — fan control is exclusively
+BMC-managed via `pwmtach.ko`. The three populated headers are
+`FAN1`, `FAN2`, `FAN3` (confirmed by `/api/asrr/settings/getsupportfan`).
+
+### Serial / console
+
+- COM1: `3F8h IRQ4` (SOL primary; BMC's `/dev/ttyS3` connects here via LPC VUART)
+- COM2: `2F8h IRQ3`
+- Debug Port 80h: snooped to BMC via LPC port 80
+
+### Storage controller summary
+
+- **AMD FCH AHCI**: up to 8 SATA ports, exposed when OCuLink connectors are in SATA mode
+- **NVMe**: via M.2 slots (M2_1, M2_2) and OCuLink connectors (OCU1, OCU2) in PCIe mode
+- **NVMe MI sideband**: routed to BMC via the PCA9545 mux on i2c4 → channel 1 (M.2 slot 1). The stock BMC reports it as SDR sensor #56 "NVME HDD".
+
 ### Stock BMC firmware mining (added 2026-05-28)
 
 Extracting the stock BMC image (`X570D4I-2T_1.90.00.ima`, 64 MB) yielded:

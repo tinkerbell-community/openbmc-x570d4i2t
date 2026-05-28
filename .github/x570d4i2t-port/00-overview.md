@@ -11,11 +11,12 @@ continuing the work in a new agent session.
 
 | Doc | Purpose |
 |---|---|
-| [01-hardware-inventory.md](01-hardware-inventory.md) | What's physically on the board — sensors, NICs, fans, I/O resources (reference) |
+| [01-hardware-inventory.md](01-hardware-inventory.md) | What's physically on the board — sensors, NICs, fans, I/O resources, slot map (reference) |
 | [02-bmc-discovery.md](02-bmc-discovery.md) | How to query the stock MegaRAC at 10.0.80.1 for more info (playbook) |
 | [03-device-tree.md](03-device-tree.md) | Linux DTS implementation task |
 | [04-meta-layer.md](04-meta-layer.md) | Yocto `meta-x570d4i2t` customization task |
 | [05-flash-and-verify.md](05-flash-and-verify.md) | External SPI flash and first-boot validation task |
+| [07-bios-internals.md](07-bios-internals.md) | What the BIOS image (X574I2T2.50) reveals — FV map, Setup defaults, PCIe topology, slot designators |
 
 ## Current status
 
@@ -28,11 +29,11 @@ continuing the work in a new agent session.
 | `power-config-host0.json` GPIO `LineName` fields | ✅ six required names populated (PostComplete, PowerButton, PowerOk, PowerOut, ResetButton, ResetOut); ID/NMI/SIO entries intentionally empty (no Intel SuperIO on AM4) |
 | Sensor IC kernel driver selection | ✅ `CONFIG_SENSORS_W83773G=y` (matches X570D4U; chip is Nuvoton W83773G on i2c1:0x4c) |
 | IPMI `dev_id.json` | ✅ populated with the live BMC's actual values (mfg_id 0x00C1D6, prod_id 0x1003, dev_id 0x20) |
-| `obmc-console.conf` (SOL) | ✅ wired to COM1 (`lpc-address=0x3f8`, `sirq=4`) per BIOS `SUPERIO001`/`SUPERIO002` |
-| `led-group-config.json` + bbappend | ✅ standard `bmc_booted` / `system_fault` groups; DTS uses legacy LED node names (`heartbeat`, `system-fault`) so the config targets them by name |
-| AMD APML / SB-RMI support | ✅ DTS adds `sbrmi@3c` on i2c1; kernel `.cfg` enables `CONFIG_SENSORS_SBRMI=m` and `CONFIG_SENSORS_SBTSI=m`. Confirmed via stock AMI firmware's `IPMI.conf` (`APML_BUS_NUMBER=1`) — gives BMC direct CPU thermal/power telemetry |
-| NVMe SMBus monitoring noted | ✅ stock SDR has a "NVME HDD" sensor (snum 56) confirming an M.2 slot wires the NVMe MI sideband through the PCA9545 mux on i2c4 channel 1 — comment added to DTS, full NVMe-MI subnode left as runtime add-on |
-| `phosphor-pid-control` fan tuning | ⏳ deferred — none of the sibling ASRock OpenBMC layers ship one; dbus-sensors/auto-discovery via DTS hwmon nodes should cover basic fan control |
+| `obmc-console.conf` (SOL) | ✅ removed — `meta-phosphor` already defaults to COM1 (`lpc-address=0x3f8`, `sirq=4`). Custom override was redundant |
+| `led-group-config.json` + bbappend | ✅ standard `bmc_booted` / `system_fault` groups; DTS uses legacy LED node names (`heartbeat`, `system-fault`) |
+| AMD APML / SB-RMI support | ✅ DTS adds `sbrmi@3c` on i2c1; kernel `.cfg` enables `CONFIG_SENSORS_SBRMI=m` (NOT SBTSI — would conflict with W83773G at 0x4c) |
+| Entity-manager JSON | ✅ ships `x570d4i2t.json` with all 13 voltage rails, W83773G, SB-RMI, 3 fans, PCA9545 mux, and a Stepwise fan curve matching the stock BMC's captured open-loop table (30°C→20% ... 100°C→100%) |
+| NVMe sideband documented | ✅ PCA9545 mux channel 1 documented as the M.2/NVMe-MI path. Live NVMe sensor instantiation deferred to runtime (Type/Address depend on actual drive) |
 | `phosphor-power` regulator config | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no VRM/regulator I2C config; voltages are read via the AST2500 internal ADC only |
 | `bios-update` in-band hook | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no `BMC_PCH_BIOS_CS_N` SPI-mux GPIO; the X570D4I-2T uses CPU PSP for in-band BIOS flash, not BMC-mediated SPI |
 | External SPI flash + first boot | ❌ not yet attempted |

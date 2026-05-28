@@ -1,0 +1,232 @@
+{
+    "Exposes": [
+        {
+            "Index": 0,
+            "Name": "3VSB",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 3.70},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 3.04}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 1,
+            "Name": "5VSB",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 5.49},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 4.50}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 2,
+            "Name": "VCPU",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.65}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 3,
+            "Name": "VSOC",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.54},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 0.36}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 4,
+            "Name": "VCCM",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.32},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 1.08}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 5,
+            "Name": "APU_VDDP",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.16},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 0.81}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 6,
+            "Name": "PM_VDD_CLDO",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.32},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 1.08}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 7,
+            "Name": "PM_VDDCR_S5",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.16},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 0.89}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 8,
+            "Name": "PM_VDDCR",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 1.16},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 0.89}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 9,
+            "Name": "BAT",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 3.40},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 2.70}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 10,
+            "Name": "3V",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 3.62},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 2.98}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 11,
+            "Name": "5V",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 5.49},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 4.50}
+            ],
+            "Type": "ADC"
+        },
+        {
+            "Index": 12,
+            "Name": "12V",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 13.20},
+                {"Direction": "less than",    "Name": "lower critical",     "Severity": 1, "Value": 10.80}
+            ],
+            "Type": "ADC"
+        },
+
+        {
+            "Address": "0x4C",
+            "Bus": 1,
+            "Name": "MB Temp",
+            "Name1": "Card Side Temp",
+            "Name2": "X570 Temp",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper non critical", "Severity": 0, "Value": 65},
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 95}
+            ],
+            "Type": "W83773G"
+        },
+
+        {
+            "Address": "0x3C",
+            "Bus": 1,
+            "Name": "CPU Temp",
+            "PowerState": "On",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper non critical", "Severity": 0, "Value": 94},
+                {"Direction": "greater than", "Name": "upper critical",     "Severity": 1, "Value": 95}
+            ],
+            "Type": "SBRMI"
+        },
+
+        {
+            "Name": "FAN1",
+            "Pwm" : 0,
+            "Tachs" : [0],
+            "Type": "FanConnector"
+        },
+        {
+            "Name": "FAN2",
+            "Pwm" : 1,
+            "Tachs" : [1],
+            "Type": "FanConnector"
+        },
+        {
+            "Name": "FAN3",
+            "Pwm" : 2,
+            "Tachs" : [2],
+            "Type": "FanConnector"
+        },
+
+        {
+            "Address": "0x70",
+            "Bus": 4,
+            "ChannelNames": [
+                "PCIE7 SMBus",
+                "M.2 Slot 1 (NVMe MI)",
+                "M.2 Slot 2",
+                "Reserved"
+            ],
+            "Name": "PCIE/M2 Slot Mux",
+            "Type": "PCA9545Mux"
+        },
+
+        {
+            "FailSafePercent": 100,
+            "MinThermalOutput": 20,
+            "Name": "Main Zone",
+            "Type": "Pid.Zone"
+        },
+        {
+            "Class": "temp",
+            "Inputs": [
+                "CPU Temp",
+                "X570 Temp",
+                "MB Temp"
+            ],
+            "Name": "Fan Curve",
+            "NegativeHysteresis": 0,
+            "Output": [
+                20.0,
+                30.0,
+                40.0,
+                50.0,
+                60.0,
+                100.0
+            ],
+            "PositiveHysteresis": 0,
+            "Reading": [
+                30.0,
+                60.0,
+                70.0,
+                80.0,
+                90.0,
+                100.0
+            ],
+            "Type": "Stepwise",
+            "Zones": [
+                "Main Zone"
+            ]
+        }
+    ],
+    "Name": "ASRockRack X570D4I-2T Baseboard",
+    "Probe": "xyz.openbmc_project.FruDevice({'PRODUCT_PRODUCT_NAME': 'X570D4I-2T'})",
+    "Type": "Board",
+    "xyz.openbmc_project.Inventory.Decorator.Asset": {
+        "Manufacturer": "ASRockRack",
+        "Model": "X570D4I-2T",
+        "PartNumber": "",
+        "SerialNumber": "$PRODUCT_SERIAL_NUMBER"
+    },
+    "xyz.openbmc_project.Inventory.Item.System": {}
+}

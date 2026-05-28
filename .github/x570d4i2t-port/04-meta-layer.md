@@ -2,11 +2,12 @@
 
 ## Status
 
-Most edits in this doc are **done**, and a full `bitbake -p` parse against
-this layer succeeds: 3108 `.bb` files, 0 errors, `MACHINE=x570d4i2t` recognised,
+All structural edits in this doc are **done**. A full `bitbake -p` parse
+succeeds: 3108 `.bb` files, 0 errors, `MACHINE=x570d4i2t` recognised,
 `KERNEL_DEVICETREE=aspeed/aspeed-bmc-asrock-x570d4i2t.dtb` correctly set, ARM
-tune `arm thumb arm1176jzs` (AST2500's ARM1176 core), all five bbappends
-route to real recipes. The current layer state is:
+tune `arm thumb arm1176jzs` (AST2500's ARM1176 core). All five bbappends
+route to real recipes (linux-aspeed, phosphor-ipmi-config, phosphor-led-manager,
+x86-power-control, **entity-manager**). The current layer state is:
 
 ```
 conf/
@@ -24,8 +25,8 @@ recipes-kernel/linux/
   linux-aspeed/aspeed-bmc-asrock-x570d4i2t.dts       ✅ NEW (compiles to 29 KB DTB)
   linux-aspeed/0001-aspeed-add-x570d4i2t-dts.patch   ✅ NEW (applies to openbmc/linux dev-6.6)
 recipes-phosphor/
-  console/obmc-console_git.bbappend                  ✅ NEW
-  console/obmc-console/obmc-console.conf             ✅ NEW (SOL on COM1 0x3f8 IRQ4)
+  configuration/entity-manager_%.bbappend            ✅ NEW
+  configuration/entity-manager/x570d4i2t.json        ✅ NEW (full sensor + fan-curve config)
   ipmi/phosphor-ipmi-config.bbappend                 ✅ NEW
   ipmi/phosphor-ipmi-config/dev_id.json              ✅ NEW (real BMC values)
   leds/phosphor-led-manager_%.bbappend               ✅ NEW
@@ -35,21 +36,19 @@ recipes-x86/chassis/
   x86-power-control/power-config-host0.json          ✅ verified
 ```
 
-**Deferred** (need a running OpenBMC or physical inspection to verify):
+**Confirmed unnecessary** (after mining the stock BMC firmware):
 
-- `recipes-phosphor/flash/phosphor-software-manager/bios-update` — needs the
-  `BMC_PCH_BIOS_CS_N` GPIO line declared in the DTS, which the upstream
-  X570D4U DTS does not expose. Without it, in-band BIOS flash from the
-  OpenBMC web UI won't work, but this is an optional convenience —
-  external SPI flashing still works. Adding speculatively risks writing
-  through the wrong SPI mux.
-- `recipes-phosphor/power/phosphor-power/config.json` — ROMED8HM3 uses an
-  ISL96147 VRM at i2c-6:0x60, but the X570D4I-2T's VRM identity is not
-  established (X570D4U DTS upstream doesn't expose one). Adding a wrong
-  regulator config drives bad voltages.
-- `recipes-phosphor/fans/phosphor-pid-control/` — none of the sibling
-  ASRock OpenBMC layers ship a PID config. dbus-sensors + kernel hwmon
-  autoplumbing through the new DTS should cover basic fan control.
+- `recipes-phosphor/flash/phosphor-software-manager/bios-update` — no
+  `BMC_PCH_BIOS_CS_N` GPIO exists on this board. X570D4I-2T uses CPU PSP
+  for in-band BIOS flash, not BMC-mediated SPI mux. Skipped.
+- `recipes-phosphor/power/phosphor-power/config.json` — stock firmware has
+  no I2C VRM regulator configured; all voltages come through the AST2500
+  internal ADC. ROMED8HM3's ISL96147 config is non-applicable. Skipped.
+
+The fan control config (Stepwise curve from
+`/api/asrr/settings/getfanopenloopcontroltable`) is shipped via
+**entity-manager** as `Pid.Zone` + `Stepwise` blocks rather than a separate
+`phosphor-pid-control` config file. This is the modern OpenBMC approach.
 
 ## Goal
 

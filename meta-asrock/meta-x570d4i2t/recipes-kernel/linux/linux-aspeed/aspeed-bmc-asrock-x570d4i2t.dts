@@ -210,11 +210,12 @@
 
 		i2c4mux0ch1: i2c@1 {
 			/*
-			 * SMBus on M.2 slot 1 — also carries the NVMe MI
-			 * sideband used by the stock BMC to report SDR
-			 * sensor #56 "NVME HDD" temperature. An nvme-mi
-			 * subnode can be added once the actual NVMe SSD
-			 * is enumerated at runtime.
+			 * SMBus on M.2 slot 1 — carries the NVMe MI sideband
+			 * used by the stock BMC to report SDR sensor #56
+			 * "NVME HDD" temperature. The actual NVMe-MI protocol
+			 * is implemented in userspace by dbus-sensors's
+			 * NVMeSensor, configured via entity-manager rather
+			 * than a kernel driver.
 			 */
 			#address-cells = <1>;
 			#size-cells = <0>;
