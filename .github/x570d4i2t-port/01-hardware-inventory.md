@@ -164,6 +164,32 @@ others = 0. No physical FAN4-FAN16.
 | 249 | WATCHDOG2 | Watchdog 2 |
 | 250 | PowerUnit | Power Unit |
 
+### Temperature (additional NVMe slot)
+
+| # | Name | Source |
+|---|---|---|
+| 56 | NVME HDD | NVMe MI sideband over SMBus, via PCA9545 mux on i2c4 (M.2 slot) |
+
+### Stock BMC firmware mining (added 2026-05-28)
+
+Extracting the stock BMC image (`X570D4I-2T_1.90.00.ima`, 64 MB) yielded:
+
+- **`/etc/defconfig/BMC1/1U2-X570/2T/SDR.dat`** (2 KB) — 36 IPMI sensor records confirming every sensor name/number above, plus an additional `NVME HDD` temperature sensor (#56) that wasn't visible in the Redfish API
+- **`/etc/defconfig/BMC1/1U2-X570/2T/IPMI.conf`** documents the I2C bus topology:
+  - `PRIMARY_IPMB_I2C_BUS_NUM=8` (i2c-8)
+  - `SECONDARY_IPMB_I2C_BUS_NUM=3` (i2c-3)
+  - `SMBUS_BUS_NUM=6` (i2c-6 — general SMBus, host-shared)
+  - `EEPROM_I2C_BUS_NUM=7` (i2c-7 — FRU + MAC EEPROM, matches X570D4U DTS)
+  - `APML_BUS_NUMBER=1`, `APML2_BUS_NUMBER=1` (i2c-1 — AMD CPU SB-RMI/SB-TSI, shares bus with W83773G)
+  - `SOL_IFC_PORT=/dev/ttyS3` (BMC's serial3 wired to host COM1 via LPC/VUART)
+- **`/info/X570D4I-2T_K5.PRJ`** — AMI MegaRAC SPX 4.0 build manifest:
+  - Kernel: 5.4.99-ami (uImage at IMA offset `0x1740040`, load `0x80008000`)
+  - Platform identifier: `1U2-X570/2T`
+  - Build date: Jun 9 2022
+- **Stock DTB** decompiles to a generic AST2500EVB device tree with NO board-specific I2C clients, GPIO line names, or LED nodes. AMI keeps all board specifics in **userspace** (libasrrcmds.so), not in the kernel DTS. This validates the approach of authoring a fresh OpenBMC-style DTS rather than trying to re-use the stock DTB.
+- **No `BMC_PCH_BIOS_CS_N` GPIO** is named anywhere in the firmware → in-band BIOS flash is done through the AMD PSP, not via BMC-mediated SPI mux. The `bios-update` hook used by ROMED8HM3 is **not applicable** to this board.
+- **No I2C-based VRM regulator** is configured → all voltages are read via the AST2500's internal ADC. The `phosphor-power/config.json` regulator config used by ROMED8HM3 is **not applicable**.
+
 ## Fan control defaults (closed-loop = "Auto" / mode 1)
 
 Captured from `/api/asrr/settings/getfanopenloopcontroltable`:

@@ -30,9 +30,11 @@ continuing the work in a new agent session.
 | IPMI `dev_id.json` | ✅ populated with the live BMC's actual values (mfg_id 0x00C1D6, prod_id 0x1003, dev_id 0x20) |
 | `obmc-console.conf` (SOL) | ✅ wired to COM1 (`lpc-address=0x3f8`, `sirq=4`) per BIOS `SUPERIO001`/`SUPERIO002` |
 | `led-group-config.json` + bbappend | ✅ standard `bmc_booted` / `system_fault` groups; DTS uses legacy LED node names (`heartbeat`, `system-fault`) so the config targets them by name |
+| AMD APML / SB-RMI support | ✅ DTS adds `sbrmi@3c` on i2c1; kernel `.cfg` enables `CONFIG_SENSORS_SBRMI=m` and `CONFIG_SENSORS_SBTSI=m`. Confirmed via stock AMI firmware's `IPMI.conf` (`APML_BUS_NUMBER=1`) — gives BMC direct CPU thermal/power telemetry |
+| NVMe SMBus monitoring noted | ✅ stock SDR has a "NVME HDD" sensor (snum 56) confirming an M.2 slot wires the NVMe MI sideband through the PCA9545 mux on i2c4 channel 1 — comment added to DTS, full NVMe-MI subnode left as runtime add-on |
 | `phosphor-pid-control` fan tuning | ⏳ deferred — none of the sibling ASRock OpenBMC layers ship one; dbus-sensors/auto-discovery via DTS hwmon nodes should cover basic fan control |
-| `phosphor-power` regulator config | ⏳ deferred — ROMED8HM3 uses ISL96147 at i2c-6:0x60, but the X570D4U upstream DTS doesn't expose any regulator. Adding speculatively is risky; needs `i2cdetect` on a running OpenBMC to confirm |
-| `bios-update` in-band hook | ⏳ deferred — ROMED8HM3's hook needs the `BMC_PCH_BIOS_CS_N` GPIO line named in the DTS, which the upstream X570D4U DTS does NOT expose. Likely safe on first iteration without it (in-band BIOS flash is an optional convenience) |
+| `phosphor-power` regulator config | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no VRM/regulator I2C config; voltages are read via the AST2500 internal ADC only |
+| `bios-update` in-band hook | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no `BMC_PCH_BIOS_CS_N` SPI-mux GPIO; the X570D4I-2T uses CPU PSP for in-band BIOS flash, not BMC-mediated SPI |
 | External SPI flash + first boot | ❌ not yet attempted |
 
 ## Provided references

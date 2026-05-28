@@ -10,9 +10,14 @@ management PHY.
 
 The device tree is based on the existing Asrock Rack X570D4U (a
 Micro-ATX sibling using the same chipset, BMC SoC and the same Nuvoton
-W83773G hardware monitor). The X570D4I-2T differs in having only three
-fan headers (FAN1..FAN3, all 4-pin) instead of six — verified against
-the stock BMC's /api/asrr/settings/getsupportfan endpoint.
+W83773G hardware monitor). Notable differences:
+
+ - Three fan headers (FAN1..FAN3, all 4-pin) instead of six. Verified
+   against the stock BMC's /api/asrr/settings/getsupportfan endpoint.
+ - AMD SB-RMI/SB-TSI (APML) interface exposed on i2c1 alongside the
+   W83773G. Confirmed against the stock AMI firmware's IPMI.conf
+   (APML_BUS_NUMBER=1, APML2_BUS_NUMBER=1) — gives the BMC direct
+   access to host CPU thermal and power telemetry.
 
 The LED block uses legacy node-name labelling (heartbeat, system-fault)
 to match the rest of the ASRock OpenBMC family and allow the shared
@@ -21,8 +26,8 @@ phosphor-led-manager led-group-config.json to target them by name.
 Signed-off-by: ASRock OpenBMC port <noreply@example.com>
 ---
  arch/arm/boot/dts/aspeed/Makefile                  |   1 +
- .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 346 ++++++++++++++++++
- 2 files changed, 347 insertions(+)
+ .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 363 ++++++++++++++++++
+ 2 files changed, 364 insertions(+)
  create mode 100644 arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
 
 diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
@@ -40,7 +45,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,363 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -206,12 +211,23 @@ new file mode 100644
 +};
 +
 +&i2c1 {
-+	/* Hardware monitoring SMBus */
++	/*
++	 * Hardware monitoring SMBus.
++	 * Hosts both the W83773G temperature monitor and the AMD CPU's
++	 * SB-RMI/SB-TSI (APML) interfaces — confirmed against the stock AMI
++	 * firmware's /etc/defconfig/BMC1/1U2-X570/2T/IPMI.conf which sets
++	 * APML_BUS_NUMBER=1 and APML2_BUS_NUMBER=1.
++	 */
 +	status = "okay";
 +
 +	w83773g@4c {
 +		compatible = "nuvoton,w83773g";
 +		reg = <0x4c>;
++	};
++
++	sbrmi@3c {
++		compatible = "amd,sbrmi";
++		reg = <0x3c>;
 +	};
 +};
 +
@@ -241,7 +257,13 @@ new file mode 100644
 +		};
 +
 +		i2c4mux0ch1: i2c@1 {
-+			/* SMBus on M.2 slot 1 */
++			/*
++			 * SMBus on M.2 slot 1 — also carries the NVMe MI
++			 * sideband used by the stock BMC to report SDR
++			 * sensor #56 "NVME HDD" temperature. An nvme-mi
++			 * subnode can be added once the actual NVMe SSD
++			 * is enumerated at runtime.
++			 */
 +			#address-cells = <1>;
 +			#size-cells = <0>;
 +			reg = <1>;

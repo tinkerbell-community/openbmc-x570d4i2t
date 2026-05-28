@@ -163,12 +163,23 @@
 };
 
 &i2c1 {
-	/* Hardware monitoring SMBus */
+	/*
+	 * Hardware monitoring SMBus.
+	 * Hosts both the W83773G temperature monitor and the AMD CPU's
+	 * SB-RMI/SB-TSI (APML) interfaces — confirmed against the stock AMI
+	 * firmware's /etc/defconfig/BMC1/1U2-X570/2T/IPMI.conf which sets
+	 * APML_BUS_NUMBER=1 and APML2_BUS_NUMBER=1.
+	 */
 	status = "okay";
 
 	w83773g@4c {
 		compatible = "nuvoton,w83773g";
 		reg = <0x4c>;
+	};
+
+	sbrmi@3c {
+		compatible = "amd,sbrmi";
+		reg = <0x3c>;
 	};
 };
 
@@ -198,7 +209,13 @@
 		};
 
 		i2c4mux0ch1: i2c@1 {
-			/* SMBus on M.2 slot 1 */
+			/*
+			 * SMBus on M.2 slot 1 — also carries the NVMe MI
+			 * sideband used by the stock BMC to report SDR
+			 * sensor #56 "NVME HDD" temperature. An nvme-mi
+			 * subnode can be added once the actual NVMe SSD
+			 * is enumerated at runtime.
+			 */
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <1>;
