@@ -23,10 +23,16 @@ continuing the work in a new agent session.
 |---|---|
 | `meta-asrock/meta-x570d4i2t/` layer scaffold | ✅ committed in `08cf84cb46` — verbatim of `meta-x570d4u` with names renamed |
 | Live MegaRAC at 10.0.80.1 mapped | ✅ sensors, network, BIOS attrs, firmware all captured (see 01) |
-| Linux DTS `aspeed-bmc-asrock-x570d4i2t.dts` | ❌ does not exist — `x570d4i2t.conf` references the DTB name but no DTS upstream |
-| `power-config-host0.json` GPIO `LineName` fields | ⚠️ mostly empty (carryover from `meta-x570d4u`) — must be filled to match DTS |
-| Sensor IC kernel driver selection | ⚠️ `x570d4i2t.cfg` enables `CONFIG_SENSORS_NCT6775_I2C=y` — needs verification against actual chip |
-| `phosphor-pid-control` fan tuning | ❌ not defined — three fan headers, default curve captured |
+| `bitbake` layer validation | ✅ full parse with `MACHINE=x570d4i2t` — 3108 `.bb` files, 0 errors, all 5 bbappends route to real recipes |
+| Linux DTS `aspeed-bmc-asrock-x570d4i2t.dts` | ✅ authored, compiles via `dtc` to a 29 KB DTB; shipped as a kernel patch verified against `openbmc/linux dev-6.18` (the actual target branch — `linux-aspeed` recipe pulls this) |
+| `power-config-host0.json` GPIO `LineName` fields | ✅ six required names populated (PostComplete, PowerButton, PowerOk, PowerOut, ResetButton, ResetOut); ID/NMI/SIO entries intentionally empty (no Intel SuperIO on AM4) |
+| Sensor IC kernel driver selection | ✅ `CONFIG_SENSORS_W83773G=y` (matches X570D4U; chip is Nuvoton W83773G on i2c1:0x4c) |
+| IPMI `dev_id.json` | ✅ populated with the live BMC's actual values (mfg_id 0x00C1D6, prod_id 0x1003, dev_id 0x20) |
+| `obmc-console.conf` (SOL) | ✅ wired to COM1 (`lpc-address=0x3f8`, `sirq=4`) per BIOS `SUPERIO001`/`SUPERIO002` |
+| `led-group-config.json` + bbappend | ✅ standard `bmc_booted` / `system_fault` groups; DTS uses legacy LED node names (`heartbeat`, `system-fault`) so the config targets them by name |
+| `phosphor-pid-control` fan tuning | ⏳ deferred — none of the sibling ASRock OpenBMC layers ship one; dbus-sensors/auto-discovery via DTS hwmon nodes should cover basic fan control |
+| `phosphor-power` regulator config | ⏳ deferred — ROMED8HM3 uses ISL96147 at i2c-6:0x60, but the X570D4U upstream DTS doesn't expose any regulator. Adding speculatively is risky; needs `i2cdetect` on a running OpenBMC to confirm |
+| `bios-update` in-band hook | ⏳ deferred — ROMED8HM3's hook needs the `BMC_PCH_BIOS_CS_N` GPIO line named in the DTS, which the upstream X570D4U DTS does NOT expose. Likely safe on first iteration without it (in-band BIOS flash is an optional convenience) |
 | External SPI flash + first boot | ❌ not yet attempted |
 
 ## Provided references
@@ -38,11 +44,11 @@ continuing the work in a new agent session.
 
 ## Suggested execution order
 
-1. **Discovery** — pull I2C bus / GPIO line / SPI flash layout from the live BMC, since neither the meta-layer nor the upstream `aspeed-bmc-asrock-x570d4u.dts` documents every value. See [02-bmc-discovery.md](02-bmc-discovery.md).
-2. **DTS** — copy `aspeed-bmc-asrock-x570d4u.dts` from the upstream Linux tree, apply the X570D4I-2T deltas, drop it in the meta-layer as a kernel patch. See [03-device-tree.md](03-device-tree.md).
-3. **Layer config** — fill in `power-config-host0.json` LineNames, verify kernel `.cfg`, define fan PID config. See [04-meta-layer.md](04-meta-layer.md).
-4. **Build** — `bitbake obmc-phosphor-image` against `MACHINE=x570d4i2t`.
-5. **Backup + flash** — external SPI programmer; extract stock MACs from the dump before writing OpenBMC. See [05-flash-and-verify.md](05-flash-and-verify.md).
+1. ~~**Discovery** — pull I2C bus / GPIO line / SPI flash layout from the live BMC~~ ✅ done (X570D4U DTS provided all needed values; live MegaRAC SSH dropped into SMASHLITE with no shell escape)
+2. ~~**DTS** — copy `aspeed-bmc-asrock-x570d4u.dts` from the upstream Linux tree, apply the X570D4I-2T deltas, drop it in the meta-layer as a kernel patch~~ ✅ done — at `meta-asrock/meta-x570d4i2t/recipes-kernel/linux/linux-aspeed/aspeed-bmc-asrock-x570d4i2t.dts`; patch verified against OpenBMC kernel fork
+3. ~~**Layer config** — fill in `power-config-host0.json` LineNames, verify kernel `.cfg`~~ ✅ done. Optional pieces (PID fan tuning, regulator config, BIOS update hook) remain — see status table above
+4. **Build** — `bitbake obmc-phosphor-image` against `MACHINE=x570d4i2t` ⏳ next user action
+5. **Backup + flash** — external SPI programmer; MACs preserve themselves via the 24c128 EEPROM at i2c7:0x57 (no manual extraction needed thanks to nvmem-cells in the DTS). See [05-flash-and-verify.md](05-flash-and-verify.md).
 6. **Validate** — compare sensor readings, POST snooping, NCSI bring-up against the captured baselines.
 
 ## Hard constraints already established
