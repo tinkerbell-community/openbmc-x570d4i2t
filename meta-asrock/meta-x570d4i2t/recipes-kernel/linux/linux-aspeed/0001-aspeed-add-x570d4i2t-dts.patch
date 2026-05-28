@@ -3,6 +3,8 @@ From: ASRock OpenBMC port <noreply@example.com>
 Date: Thu, 28 May 2026 06:00:00 +0000
 Subject: [PATCH] ARM: dts: aspeed: Add ASRock X570D4I-2T BMC
 
+Upstream-Status: Pending
+
 Add Linux device tree for the ASRock Rack X570D4I-2T motherboard, a
 Mini-ITX AMD AM4 server board with an ASPEED AST2500 BMC, dual Intel
 X550-AT2 10GbE host NICs and a dedicated Realtek RTL8211E 1GbE BMC
