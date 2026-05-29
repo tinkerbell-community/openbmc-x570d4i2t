@@ -3,3 +3,8 @@ customrc
 *.sw?
 .repo/
 .vscode/
+*.img
+*.iso
+*.ima
+*.EXE
+*.zip

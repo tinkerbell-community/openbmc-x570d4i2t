@@ -1,0 +1,16 @@
+# Disable bmcweb's zstd HTTP compression.
+#
+# Upstream bmcweb 8a32dac3 (and surrounding commits) attempts zstd compression
+# when the client offers it in Accept-Encoding, but the fallback path when
+# ZSTD_createCCtx() fails returns an empty body instead of falling back to
+# gzip/br. Result: any modern browser (Chrome 123+, Firefox 126+) sees a
+# blank page because the HTML/JS responses are 0 bytes.
+#
+# Disabling http-zstd here forces bmcweb to use gzip/br only — which is
+# what every browser already supports, and which works reliably.
+#
+# Once upstream bmcweb is fixed (correct fallback when zstd init fails, or
+# the zstd init issue itself is resolved on ARM AST2500), this bbappend can
+# be reverted.
+
+PACKAGECONFIG:remove = "http-zstd"
