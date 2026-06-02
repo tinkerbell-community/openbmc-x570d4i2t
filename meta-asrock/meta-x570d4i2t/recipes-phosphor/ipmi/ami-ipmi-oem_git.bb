@@ -17,11 +17,9 @@ SRC_URI = " \
 S = "${UNPACKDIR}/${BP}"
 
 DEPENDS = " \
-    boost \
-    sdbusplus \
-    phosphor-dbus-interfaces \
     phosphor-logging \
     phosphor-ipmi-host \
+    systemd \
 "
 
 inherit cmake pkgconfig obmc-phosphor-ipmiprovider-symlink
