@@ -7,10 +7,17 @@
 // deserialization SEGV on this ipmid version).
 //
 // Protocol (confirmed from live POST captures, NetFn 0x32):
-//   0x72  GetBlock    — BIOS polls BMC for cached SMBIOS; reply OutOfSpace→push
-//   0x3D  SendBlock   — BIOS PUSHES raw SMBIOS chunk bytes to BMC
-//   0x5D  DataDone    — BIOS signals end of transfer; BMC writes + notifies
-//   0x30  AgentStatus — BIOS handshake; BMC replies "want SMBIOS"
+//   Phase 1 — Directory announcement:
+//     0x72  GetBlock REQ=00 01 00  (×N polls) — BIOS checks if BMC has cache;
+//                                                CC=0x00 signals "no data, please push"
+//     0x3D  SendBlock [01 00 07]              — BIOS pushes 3-byte MDR directory entry
+//     0x5D  DataDone  REQ=[01]               — directory phase complete; BMC clears buffer
+//   Phase 2 — Actual SMBIOS data:
+//     0x72  GetBlock REQ=01 00 00            — BIOS asks "want actual data?"
+//                                              CC=0x00 response triggers data push
+//     0x3D  SendBlock [<chunk>]  (×N)       — BIOS pushes full SMBIOS tables
+//     0x5D  DataDone  REQ=[02]              — data transfer done; BMC writes smbios2
+//   0x30  AgentStatus — BIOS handshake; BMC replies "want SMBIOS" (dataRequest=1)
 //   0x31  GetDir      — BIOS queries BMC directory
 //
 // NOTE: Do NOT use phosphor-logging/log.hpp here. The libphosphor_logging.so.1
@@ -143,15 +150,22 @@ static void triggerMdrSync()
 
 static ipmi_ret_t handlerMdrGetBlock(
     ipmi_netfn_t, ipmi_cmd_t,
-    ipmi_request_t request, ipmi_response_t,
+    ipmi_request_t request, ipmi_response_t response,
     ipmi_data_len_t data_len, ipmi_context_t)
 {
     try {
         std::string dump = hexDump(static_cast<const uint8_t*>(request), *data_len);
-        LOG_INFO("Cmd 0x72 GetBlock REQ=%s", dump.c_str());
+        LOG_INFO("Cmd 0x72 GetBlock REQ[%zu]=%s state=%d buf=%zu",
+                 *data_len, dump.c_str(), (int)g_state, g_smbiosBuf.size());
     } catch (...) {}
-    *data_len = 0;
-    return IPMI_CC_OUT_OF_SPACE;  // no cached data → BIOS will push
+    // Return CC=0x00 (success) with status byte 0x00 = "data not present, update needed".
+    // Returning CC=0xC4 (OUT_OF_SPACE) told the BIOS "busy/full" — it stopped pushing.
+    // CC=0x00 signals readiness; the BIOS then pushes directory (phase 1) or actual
+    // SMBIOS data (phase 2) via 0x3D SendBlock + 0x5D DataDone.
+    uint8_t* rsp = static_cast<uint8_t*>(response);
+    rsp[0] = 0x00;  // dataStatus = not present / needs update
+    *data_len = 1;
+    return IPMI_CC_OK;
 }
 
 static ipmi_ret_t handlerMdrSendBlock(
@@ -199,12 +213,42 @@ static ipmi_ret_t handlerMdrSendDir(
     ipmi_data_len_t data_len, ipmi_context_t)
 {
     try {
-        std::string dump = hexDump(static_cast<const uint8_t*>(request), *data_len);
-        LOG_INFO("Cmd 0x5D DataDone len=%zu buf=%zu req=%s",
-                 *data_len, g_smbiosBuf.size(), dump.c_str());
+        const uint8_t* req = static_cast<const uint8_t*>(request);
+        uint8_t phase = (*data_len > 0) ? req[0] : 0;
+        std::string dump = hexDump(req, *data_len);
+        LOG_INFO("Cmd 0x5D DataDone phase=0x%02X len=%zu buf=%zu req=%s",
+                 phase, *data_len, g_smbiosBuf.size(), dump.c_str());
 
+        if (phase == 0x01)
+        {
+            // Phase 1: directory announcement done.
+            // The 3-byte packet was MDR directory metadata — not SMBIOS table data.
+            // Discard it, reset state to Idle so the next 0x3D auto-begins a fresh
+            // session for the actual SMBIOS data pushed in phase 2.
+            LOG_INFO("Cmd 0x5D phase=01: directory done — discarding %zu dir bytes, "
+                     "resetting for data phase", g_smbiosBuf.size());
+            g_smbiosBuf.clear();
+            g_state    = MdrState::Idle;
+            g_expected = 0;
+            static_cast<uint8_t*>(response)[0] = 0x00;
+            *data_len = 1;
+            return IPMI_CC_OK;
+        }
+
+        // Phase 2 (req=02) or legacy (req=00): actual data transfer done → commit.
         if (g_state == MdrState::Receiving)
         {
+            if (g_smbiosBuf.size() < 64)
+            {
+                LOG_WARN("Cmd 0x5D phase=0x%02X: suspiciously small buffer (%zu bytes) "
+                         "— discarding, not writing smbios2", phase, g_smbiosBuf.size());
+                g_smbiosBuf.clear();
+                g_state    = MdrState::Idle;
+                g_expected = 0;
+                static_cast<uint8_t*>(response)[0] = 0x00;
+                *data_len = 1;
+                return IPMI_CC_OK;
+            }
             bool ok = writeSmbiosFile();
             if (ok) triggerMdrSync();
             g_state    = MdrState::Idle;
@@ -313,6 +357,22 @@ static ipmi_ret_t handlerMdrDataEnd(
 }
 
 // ── Registration ──────────────────────────────────────────────────────────────
+
+// Generic probe handler for commands we intercept purely for logging.
+static ipmi_ret_t handlerProbe(
+    ipmi_netfn_t netfn, ipmi_cmd_t cmd,
+    ipmi_request_t request, ipmi_response_t,
+    ipmi_data_len_t data_len, ipmi_context_t)
+{
+    try {
+        std::string dump = hexDump(static_cast<const uint8_t*>(request), *data_len);
+        LOG_INFO("PROBE NetFn=0x%02X Cmd=0x%02X len=%zu data=%s",
+                 netfn, cmd, *data_len, dump.c_str());
+    } catch (...) {}
+    *data_len = 0;
+    return IPMI_CC_INVALID_FIELD_REQUEST;
+}
+
 void setupGlobalOemFunctions() __attribute__((constructor));
 void setupGlobalOemFunctions()
 {
@@ -330,8 +390,22 @@ void setupGlobalOemFunctions()
         ipmi_register_callback(nf, cmdMdrBeginLeg,    nullptr, handlerMdrDataBegin,   PRIVILEGE_ADMIN);
         ipmi_register_callback(nf, cmdMdrWriteLeg,    nullptr, handlerMdrSendBlock,   PRIVILEGE_ADMIN);
         ipmi_register_callback(nf, cmdMdrEndLeg,      nullptr, handlerMdrDataEnd,     PRIVILEGE_ADMIN);
+
+        // Probe handlers for unidentified commands — log everything the BIOS sends
+        // on these NetFns so we can discover the full AMI MDR protocol.
+        static const uint8_t probeCmds[] = {
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3E, 0x3F,
+            0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+            0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5E, 0x5F,
+            0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+            0x70, 0x71, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+        };
+        for (uint8_t c : probeCmds)
+            ipmi_register_callback(nf, c, nullptr, handlerProbe, PRIVILEGE_ADMIN);
     }
 
     LOG_INFO("handlers registered");
 }
-
