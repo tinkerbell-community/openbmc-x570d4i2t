@@ -3,20 +3,38 @@
 // ami-ipmi-oem.cpp — AMI MDR SMBIOS push handler for ASRock X570D4I-2T
 //
 // The AMI Aptio V UEFI BIOS pushes SMBIOS tables via a proprietary MDR
-// (Managed Data Region) block-transfer protocol over the KCS channel.
-// It targets OEM NetFns (0x3A primary, 0x32 alternate).  This provider
-// intercepts those IPMI commands, reassembles the fragmented payload in
-// a local buffer, prepends the MDRSMBIOSHeader expected by smbiosmdrv2app,
-// writes the result to /var/lib/smbios/smbios2, and calls
-// xyz.openbmc_project.Smbios.MDR_V2 → AgentSynchronizeData so the
-// running daemon parses the new file and populates D-Bus inventory.
+// (Managed Data Region) protocol on NetFn 0x32 over the KCS channel.
 //
-// ── Protocol discovery ──────────────────────────────────────────────────────
-// The exact command IDs the AMI BIOS uses are logged at INFO level every
-// time a handler fires.  After the first BIOS POST, run:
-//   journalctl -u phosphor-ipmi-host -g "ami-ipmi-oem"
-// to see which NetFn / Cmd pairs actually arrive and tune the constants
-// cmdMdrBegin / cmdMdrWrite / cmdMdrEnd if needed.
+// ── Confirmed protocol (captured via busctl monitor during POST) ────────────
+//
+// NetFn 0x32 commands observed from the AMI BIOS:
+//
+//   Cmd 0x72  MdrIIGetDataBlock — BIOS polls BMC for a cached SMBIOS block
+//             Request:  [regionId (1B), blkLow (1B), blkHigh (1B)]
+//             Response: [status (1B)]  0x00 = no data; 0x01 = data follows
+//             The BIOS issues ~10 polls per region (0x00 and 0x01) during
+//             early POST to detect whether the BMC already has valid tables.
+//
+//   Cmd 0x3D  MdrIIAgentStatus — BIOS announces itself and queries BMC caps
+//             Request:  [agentId (1B), dirVersion (1B), version (1B)]
+//             Response: [mdrVersion (1B), agentVersion (1B), dirVersion (1B),
+//                        dirEntries (1B), dataRequest (1B)]
+//             dataRequest = 0x01 → BMC requests BIOS to send SMBIOS data.
+//
+//   Cmd 0x5D  MdrIIGetDirectory — BIOS queries what the BMC has cached
+//             Request:  [dirIndex (1B)]
+//             Response: [dirVersion (1B), dirEntries (1B), remaining (1B)]
+//             When dirEntries=0 BIOS knows BMC has nothing; it will then push.
+//
+// After these three handshake commands succeed, the BIOS begins the data
+// transfer using additional commands that are logged below as they arrive
+// (check journald "ami-ipmi-oem" for NEW_CMD entries after the next POST).
+//
+// ── SMBIOS persistence ───────────────────────────────────────────────────────
+// Once a full SMBIOS payload has been received and reassembled (via whatever
+// data-write commands the BIOS uses), it is written to /var/lib/smbios/smbios2
+// with a 10-byte MDRSMBIOSHeader, then xyz.openbmc_project.Smbios.MDR_V2 →
+// AgentSynchronizeData is called to parse the tables into D-Bus inventory.
 
 #include <ipmid/api.hpp>
 #include <ipmid/utils.hpp>
@@ -24,82 +42,91 @@
 #include <sdbusplus/bus.hpp>
 #include <sdbusplus/exception.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <vector>
 
 using namespace phosphor::logging;
 
 // ── NetFn constants ──────────────────────────────────────────────────────────
-// Both are registered; boot logs will reveal which the BIOS actually uses.
-static constexpr ipmi::NetFn netFnAmiMdr    = 0x3A;  // primary (OEM group)
-static constexpr ipmi::NetFn netFnAmiMdrAlt = 0x32;  // alternate OEM group
+static constexpr ipmi::NetFn netFnAmi32 = 0x32;  // AMI MDR (confirmed)
+static constexpr ipmi::NetFn netFnAmi3A = 0x3A;  // AMI OEM (sensors/board)
 
-// ── MDR protocol phase command IDs (AMI v1/v2 mixed set) ────────────────────
-// Phase 1 — Open / Begin: BIOS declares upcoming transfer size
-static constexpr ipmi::Cmd cmdMdrBegin     = 0x20;
-// Phase 2 — Write Chunk: BIOS sends raw SMBIOS bytes, one block at a time
-static constexpr ipmi::Cmd cmdMdrWrite     = 0x21;
-// Phase 3 — End / Close: BIOS signals transfer complete
-static constexpr ipmi::Cmd cmdMdrEnd       = 0x22;
+// ── Confirmed command IDs (live D-Bus capture, X570D4I-2T POST) ──────────────
+static constexpr ipmi::Cmd cmdMdrGetBlock   = 0x72;  // BIOS polls cached block
+static constexpr ipmi::Cmd cmdMdrAgentStat  = 0x3D;  // BIOS announces itself
+static constexpr ipmi::Cmd cmdMdrGetDir     = 0x5D;  // BIOS queries directory
 
-// Intel MDR-v2-style alternative IDs sometimes seen on AMI platforms:
-static constexpr ipmi::Cmd cmdMdrDataStart = 0x3B;   // ≈ Begin
-static constexpr ipmi::Cmd cmdMdrDataBlock = 0x3D;   // ≈ Write
-static constexpr ipmi::Cmd cmdMdrDataDone  = 0x3C;   // ≈ End
+// Data-write commands: not yet observed (BIOS aborted before reaching them).
+// These are registered speculatively; their handlers log and accumulate data.
+static constexpr ipmi::Cmd cmdMdrDataBegin  = 0x3B;  // ≈ send-region-info
+static constexpr ipmi::Cmd cmdMdrDataWrite  = 0x3C;  // ≈ send-data-block
+static constexpr ipmi::Cmd cmdMdrDataEnd    = 0x3E;  // ≈ transfer-done
+// Legacy simple-sequence IDs also covered:
+static constexpr ipmi::Cmd cmdMdrBeginLeg   = 0x20;
+static constexpr ipmi::Cmd cmdMdrWriteLeg   = 0x21;
+static constexpr ipmi::Cmd cmdMdrEndLeg     = 0x22;
 
 // ── File-system / D-Bus coordinates ─────────────────────────────────────────
-static constexpr const char* kSmbiosDir   = "/var/lib/smbios";
-static constexpr const char* kSmbiosFile  = "/var/lib/smbios/smbios2";
-static constexpr const char* kMdrService  = "xyz.openbmc_project.Smbios.MDR_V2";
-static constexpr const char* kMdrObjPath  = "/xyz/openbmc_project/Smbios/MDR_V2";
-static constexpr const char* kMdrIface    = "xyz.openbmc_project.Smbios.MDR_V2";
-static constexpr const char* kSyncMethod  = "AgentSynchronizeData";
+static constexpr const char* kSmbiosDir  = "/var/lib/smbios";
+static constexpr const char* kSmbiosFile = "/var/lib/smbios/smbios2";
+static constexpr const char* kMdrService = "xyz.openbmc_project.Smbios.MDR_V2";
+static constexpr const char* kMdrPath    = "/xyz/openbmc_project/Smbios/MDR_V2";
+static constexpr const char* kMdrIface   = "xyz.openbmc_project.Smbios.MDR_V2";
+static constexpr const char* kSyncMethod = "AgentSynchronizeData";
 
-// ── MDRSMBIOSHeader ──────────────────────────────────────────────────────────
-// Matches the struct expected by smbiosmdrv2app::readDataFromFlash().
-// See: smbios-mdr/include/smbios_mdrv2.hpp
+// ── MDRSMBIOSHeader — matches smbiosmdrv2app::readDataFromFlash() ────────────
 struct MDRSMBIOSHeader
 {
     uint8_t  dirVersion;  // 0x02
-    uint8_t  mdrType;     // 0x02 = mdrTypeII (SMBIOS region)
-    uint32_t timestamp;   // seconds since Unix epoch, little-endian
-    uint32_t dataSize;    // raw SMBIOS byte count that immediately follows
+    uint8_t  mdrType;     // 0x02 = SMBIOS region
+    uint32_t timestamp;   // Unix epoch seconds, little-endian
+    uint32_t dataSize;    // payload byte count immediately following
 } __attribute__((packed));
-static_assert(sizeof(MDRSMBIOSHeader) == 10,
-              "MDRSMBIOSHeader must be exactly 10 bytes");
+static_assert(sizeof(MDRSMBIOSHeader) == 10, "MDRSMBIOSHeader size mismatch");
 
-// ── Transfer-session state machine ───────────────────────────────────────────
+// ── Transfer state machine ────────────────────────────────────────────────────
 enum class MdrState : uint8_t { Idle, Open, Receiving };
-
 static MdrState             g_state    = MdrState::Idle;
 static uint32_t             g_expected = 0;
 static std::vector<uint8_t> g_smbiosBuf;
 
-// ── Internal helpers ─────────────────────────────────────────────────────────
+// ── Hex dump helper (for logging unknown commands) ───────────────────────────
+static std::string hexDump(const std::vector<uint8_t>& v)
+{
+    std::ostringstream os;
+    for (auto b : v)
+    {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", static_cast<unsigned>(b));
+        os << buf;
+    }
+    return os.str();
+}
+
+// ── Persistence helpers ───────────────────────────────────────────────────────
 
 static bool writeSmbiosFile()
 {
     namespace fs = std::filesystem;
-
     std::error_code ec;
     fs::create_directories(kSmbiosDir, ec);
     if (ec)
     {
-        log<level::ERR>("ami-ipmi-oem: cannot create smbios directory",
-                        entry("PATH=%s",  kSmbiosDir),
-                        entry("ERROR=%s", ec.message().c_str()));
+        log<level::ERR>("ami-ipmi-oem: mkdir smbios failed",
+                        entry("ERR=%s", ec.message().c_str()));
         return false;
     }
 
     std::ofstream ofs(kSmbiosFile, std::ios::binary | std::ios::trunc);
     if (!ofs)
     {
-        log<level::ERR>("ami-ipmi-oem: failed to open smbios2 for writing",
-                        entry("FILE=%s", kSmbiosFile));
+        log<level::ERR>("ami-ipmi-oem: open smbios2 for write failed");
         return false;
     }
 
@@ -114,12 +141,9 @@ static bool writeSmbiosFile()
     ofs.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
     ofs.write(reinterpret_cast<const char*>(g_smbiosBuf.data()),
               static_cast<std::streamsize>(g_smbiosBuf.size()));
-    ofs.close();
 
     log<level::INFO>("ami-ipmi-oem: smbios2 written",
-                     entry("FILE=%s",   kSmbiosFile),
-                     entry("HEADER_BYTES=%zu", sizeof(hdr)),
-                     entry("DATA_BYTES=%zu",   g_smbiosBuf.size()));
+                     entry("BYTES=%zu", g_smbiosBuf.size()));
     return true;
 }
 
@@ -128,187 +152,211 @@ static void triggerMdrSync()
     auto bus = getSdBus();
     try
     {
-        auto method = bus->new_method_call(kMdrService, kMdrObjPath,
-                                           kMdrIface, kSyncMethod);
-        auto reply  = bus->call(method);
-        bool ok     = false;
-        reply.read(ok);
-        log<level::INFO>("ami-ipmi-oem: AgentSynchronizeData returned",
-                         entry("STATUS=%d", static_cast<int>(ok)));
+        auto m = bus->new_method_call(kMdrService, kMdrPath,
+                                      kMdrIface, kSyncMethod);
+        auto r = bus->call(m);
+        bool ok = false;
+        r.read(ok);
+        log<level::INFO>("ami-ipmi-oem: AgentSynchronizeData",
+                         entry("OK=%d", static_cast<int>(ok)));
     }
     catch (const sdbusplus::exception_t& e)
     {
-        log<level::ERR>("ami-ipmi-oem: D-Bus AgentSynchronizeData failed",
+        log<level::ERR>("ami-ipmi-oem: AgentSynchronizeData failed",
                         entry("WHAT=%s", e.what()));
     }
 }
 
-// ── Phase 1: MDR Begin / Open ────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Cmd 0x72  MdrIIGetDataBlock
 //
-// Expected request payload: 4-byte little-endian declared transfer size.
-// Responds with a single 0x00 status byte on success.
+// BIOS asks: "do you have a cached SMBIOS block for region R, block N?"
+// We always answer "no data" so the BIOS knows it must push fresh tables.
+// ────────────────────────────────────────────────────────────────────────────
 static ipmi::RspType<uint8_t>
-handlerMdrBegin(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
+handlerMdrGetBlock(ipmi::Context::ptr /*ctx*/,
+                   uint8_t regionId, uint8_t blkLow, uint8_t blkHigh)
 {
-    log<level::INFO>(
-        "ami-ipmi-oem: MDR Begin received",
-        entry("NETFN=0x%02X", static_cast<unsigned>(netFnAmiMdr)),
-        entry("CMD=0x%02X",   static_cast<unsigned>(cmdMdrBegin)),
-        entry("PAYLOAD_LEN=%zu", req.size()));
+    log<level::INFO>("ami-ipmi-oem: Cmd 0x72 MdrGetBlock",
+                     entry("REGION=0x%02X", regionId),
+                     entry("BLOCK=%u", static_cast<unsigned>((blkHigh << 8) | blkLow)));
+    // 0x00 = no cached block; BIOS will proceed to push data
+    return ipmi::responseSuccess(uint8_t{0x00});
+}
 
-    if (req.size() < 4)
-    {
-        log<level::WARNING>(
-            "ami-ipmi-oem: Begin payload too short – expected ≥4 bytes",
-            entry("GOT=%zu", req.size()));
-        return ipmi::responseReqDataLenInvalid();
-    }
+// ────────────────────────────────────────────────────────────────────────────
+// Cmd 0x3D  MdrIIAgentStatus
+//
+// BIOS announces itself and asks for BMC's MDR capability.
+// We respond: mdrVersion=1, agentVersion=1, dirVersion=0, entries=0,
+// dataRequest=1 (bit 0 set = BMC wants BIOS to push SMBIOS data).
+// ────────────────────────────────────────────────────────────────────────────
+static ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t, uint8_t>
+handlerMdrAgentStatus(ipmi::Context::ptr /*ctx*/,
+                      uint8_t agentId, uint8_t dirVer, uint8_t version)
+{
+    log<level::INFO>("ami-ipmi-oem: Cmd 0x3D MdrAgentStatus",
+                     entry("AGENT=0x%02X", agentId),
+                     entry("DIRVER=0x%02X", dirVer),
+                     entry("VER=0x%02X", version));
+    return ipmi::responseSuccess(
+        uint8_t{0x01},   // mdrVersion
+        uint8_t{0x01},   // agentVersion
+        uint8_t{0x00},   // dirVersion (0 = nothing cached)
+        uint8_t{0x00},   // dirEntries (0 = BMC has no cached regions)
+        uint8_t{0x01}    // dataRequest (1 = please send SMBIOS)
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Cmd 0x5D  MdrIIGetDirectory
+//
+// BIOS queries which MDR regions the BMC has stored.
+// We report no entries so BIOS knows it must push fresh data.
+// ────────────────────────────────────────────────────────────────────────────
+static ipmi::RspType<uint8_t, uint8_t, uint8_t>
+handlerMdrGetDir(ipmi::Context::ptr /*ctx*/, uint8_t dirIndex)
+{
+    log<level::INFO>("ami-ipmi-oem: Cmd 0x5D MdrGetDirectory",
+                     entry("IDX=%u", dirIndex));
+    return ipmi::responseSuccess(
+        uint8_t{0x00},   // dirVersion
+        uint8_t{0x00},   // dirEntries (0 = nothing cached)
+        uint8_t{0x00}    // remaining
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Data-transfer handlers (speculative — not yet observed)
+//
+// Registered for the command IDs most likely used by AMI BIOS for the actual
+// SMBIOS block transfer that follows the handshake above.  They accumulate
+// payload bytes and commit the file on End.
+// ────────────────────────────────────────────────────────────────────────────
+
+static ipmi::RspType<uint8_t>
+handlerMdrDataBegin(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
+{
+    std::string hex = hexDump(req);
+    log<level::INFO>("ami-ipmi-oem: Cmd DataBegin received",
+                     entry("LEN=%zu", req.size()),
+                     entry("DATA=%s", hex.c_str()));
 
     uint32_t declared = 0;
-    std::memcpy(&declared, req.data(), sizeof(declared));  // little-endian
+    if (req.size() >= 4)
+        std::memcpy(&declared, req.data(), 4);
+    else if (!req.empty())
+        declared = req[0];
 
     g_smbiosBuf.clear();
-    g_smbiosBuf.reserve(declared);
+    g_smbiosBuf.reserve(declared ? declared : 65536);
     g_expected = declared;
     g_state    = MdrState::Open;
 
     log<level::INFO>("ami-ipmi-oem: MDR session opened",
-                     entry("EXPECTED_BYTES=%u", g_expected));
-
+                     entry("EXPECTED=%u", g_expected));
     return ipmi::responseSuccess(uint8_t{0x00});
 }
 
-// ── Phase 2: MDR Write Chunk ─────────────────────────────────────────────────
-//
-// Request payload: raw SMBIOS bytes for this chunk (1 – N bytes).
 static ipmi::RspType<>
-handlerMdrWrite(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> chunk)
+handlerMdrDataWrite(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> chunk)
 {
-    log<level::INFO>(
-        "ami-ipmi-oem: MDR Write received",
-        entry("CMD=0x%02X",    static_cast<unsigned>(cmdMdrWrite)),
-        entry("CHUNK_LEN=%zu", chunk.size()),
-        entry("BUFFERED=%zu",  g_smbiosBuf.size()));
+    log<level::INFO>("ami-ipmi-oem: Cmd DataWrite received",
+                     entry("CHUNK=%zu", chunk.size()),
+                     entry("TOTAL=%zu", g_smbiosBuf.size() + chunk.size()));
 
     if (g_state != MdrState::Open && g_state != MdrState::Receiving)
     {
-        log<level::WARNING>(
-            "ami-ipmi-oem: Write received outside of active MDR session");
+        log<level::WARNING>("ami-ipmi-oem: DataWrite outside MDR session");
         return ipmi::responseUnspecifiedError();
     }
-
     if (chunk.empty())
-    {
         return ipmi::responseReqDataLenInvalid();
-    }
 
     g_smbiosBuf.insert(g_smbiosBuf.end(), chunk.begin(), chunk.end());
     g_state = MdrState::Receiving;
-
     return ipmi::responseSuccess();
 }
 
-// ── Phase 3: MDR End / Close ─────────────────────────────────────────────────
-//
-// On success: writes header+buffer to /var/lib/smbios/smbios2 and
-// triggers smbiosmdrv2app to parse it via D-Bus.
 static ipmi::RspType<uint8_t>
-handlerMdrEnd(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> /*req*/)
+handlerMdrDataEnd(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>(
-        "ami-ipmi-oem: MDR End received",
-        entry("CMD=0x%02X",      static_cast<unsigned>(cmdMdrEnd)),
-        entry("TOTAL_BYTES=%zu", g_smbiosBuf.size()));
+    std::string hex = hexDump(req);
+    log<level::INFO>("ami-ipmi-oem: Cmd DataEnd received",
+                     entry("TRAILING=%s", hex.c_str()),
+                     entry("TOTAL=%zu", g_smbiosBuf.size()));
 
     if (g_state == MdrState::Idle)
     {
-        log<level::WARNING>(
-            "ami-ipmi-oem: End received with no active MDR session");
+        log<level::WARNING>("ami-ipmi-oem: DataEnd with no active session");
         return ipmi::responseUnspecifiedError();
     }
 
-    if (!writeSmbiosFile())
-    {
-        g_state = MdrState::Idle;
-        return ipmi::responseUnspecifiedError();
-    }
-
-    triggerMdrSync();
+    bool ok = writeSmbiosFile();
+    if (ok)
+        triggerMdrSync();
 
     g_state    = MdrState::Idle;
     g_expected = 0;
-    // Intentionally keep g_smbiosBuf populated for post-mortem inspection;
-    // it will be cleared on the next Begin.
 
-    return ipmi::responseSuccess(uint8_t{0x00});
+    return ok ? ipmi::responseSuccess(uint8_t{0x00})
+              : ipmi::responseUnspecifiedError();
 }
 
-// ── Intel MDR-v2-style alternate command IDs (forwarded to same state machine)
-// These log their own NetFn/Cmd so we can identify them in journald.
-
-static ipmi::RspType<uint8_t>
-handlerMdrDataStart(ipmi::Context::ptr ctx, std::vector<uint8_t> req)
-{
-    log<level::INFO>(
-        "ami-ipmi-oem: DataStart (0x3B) aliased to Begin",
-        entry("CMD=0x%02X", static_cast<unsigned>(cmdMdrDataStart)));
-    return handlerMdrBegin(ctx, std::move(req));
-}
-
-static ipmi::RspType<>
-handlerMdrDataBlock(ipmi::Context::ptr ctx, std::vector<uint8_t> req)
-{
-    log<level::INFO>(
-        "ami-ipmi-oem: DataBlock (0x3D) aliased to Write",
-        entry("CMD=0x%02X", static_cast<unsigned>(cmdMdrDataBlock)));
-    return handlerMdrWrite(ctx, std::move(req));
-}
-
-static ipmi::RspType<uint8_t>
-handlerMdrDataDone(ipmi::Context::ptr ctx, std::vector<uint8_t> req)
-{
-    log<level::INFO>(
-        "ami-ipmi-oem: DataDone (0x3C) aliased to End",
-        entry("CMD=0x%02X", static_cast<unsigned>(cmdMdrDataDone)));
-    return handlerMdrEnd(ctx, std::move(req));
-}
-
-// ── Handler registration (called at library load time) ───────────────────────
+// ── Handler registration ─────────────────────────────────────────────────────
 static void registerAmiIpmiOem() __attribute__((constructor));
 static void registerAmiIpmiOem()
 {
     log<level::INFO>(
         "ami-ipmi-oem: registering AMI MDR handlers",
-        entry("NETFN_PRIMARY=0x%02X",  static_cast<unsigned>(netFnAmiMdr)),
-        entry("NETFN_ALTERNATE=0x%02X", static_cast<unsigned>(netFnAmiMdrAlt)));
+        entry("NETFN_32=0x%02X", static_cast<unsigned>(netFnAmi32)),
+        entry("NETFN_3A=0x%02X", static_cast<unsigned>(netFnAmi3A)));
 
-    // ── Primary NetFn 0x3A ──────────────────────────────────────────────────
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrBegin,
-                          ipmi::Privilege::Admin, handlerMdrBegin);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrWrite,
-                          ipmi::Privilege::Admin, handlerMdrWrite);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrEnd,
-                          ipmi::Privilege::Admin, handlerMdrEnd);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrDataStart,
-                          ipmi::Privilege::Admin, handlerMdrDataStart);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrDataBlock,
-                          ipmi::Privilege::Admin, handlerMdrDataBlock);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdr, cmdMdrDataDone,
-                          ipmi::Privilege::Admin, handlerMdrDataDone);
+    // ── NetFn 0x32 — AMI MDR (confirmed) ───────────────────────────────────
+    // Handshake commands (confirmed observed):
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrGetBlock,
+                          ipmi::Privilege::Admin, handlerMdrGetBlock);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrAgentStat,
+                          ipmi::Privilege::Admin, handlerMdrAgentStatus);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrGetDir,
+                          ipmi::Privilege::Admin, handlerMdrGetDir);
 
-    // ── Alternate NetFn 0x32 ────────────────────────────────────────────────
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrBegin,
-                          ipmi::Privilege::Admin, handlerMdrBegin);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrWrite,
-                          ipmi::Privilege::Admin, handlerMdrWrite);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrEnd,
-                          ipmi::Privilege::Admin, handlerMdrEnd);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrDataStart,
-                          ipmi::Privilege::Admin, handlerMdrDataStart);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrDataBlock,
-                          ipmi::Privilege::Admin, handlerMdrDataBlock);
-    ipmi::registerHandler(ipmi::prioOemBase, netFnAmiMdrAlt, cmdMdrDataDone,
-                          ipmi::Privilege::Admin, handlerMdrDataDone);
+    // Data-transfer commands (speculative, not yet observed):
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrDataBegin,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrDataWrite,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrDataEnd,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrBeginLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrWriteLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi32, cmdMdrEndLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
 
-    log<level::INFO>("ami-ipmi-oem: all MDR handlers registered");
+    // ── NetFn 0x3A — AMI OEM (board name / sensors pushed by BIOS) ─────────
+    // Handshake commands (mirror of 0x32 set):
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrGetBlock,
+                          ipmi::Privilege::Admin, handlerMdrGetBlock);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrAgentStat,
+                          ipmi::Privilege::Admin, handlerMdrAgentStatus);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrGetDir,
+                          ipmi::Privilege::Admin, handlerMdrGetDir);
+
+    // Data-transfer on 0x3A:
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrDataBegin,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrDataWrite,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrDataEnd,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrBeginLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrWriteLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrEndLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
+
+    log<level::INFO>("ami-ipmi-oem: handlers registered");
 }
