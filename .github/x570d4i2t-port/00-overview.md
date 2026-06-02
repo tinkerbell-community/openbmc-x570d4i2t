@@ -16,6 +16,7 @@ continuing the work in a new agent session.
 | [03-device-tree.md](03-device-tree.md) | Linux DTS implementation task |
 | [04-meta-layer.md](04-meta-layer.md) | Yocto `meta-x570d4i2t` customization task |
 | [05-flash-and-verify.md](05-flash-and-verify.md) | External SPI flash and first-boot validation task |
+| [06-post-flash-discoveries.md](06-post-flash-discoveries.md) | What we learned AFTER the first flash — NCT6779 SuperIO, PMBus PSU quirks, EM silent-drop bug, fan-control limits |
 | [07-bios-internals.md](07-bios-internals.md) | What the BIOS image (X574I2T2.50) reveals — FV map, Setup defaults, PCIe topology, slot designators |
 
 ## Current status
@@ -36,7 +37,11 @@ continuing the work in a new agent session.
 | NVMe sideband documented | ✅ PCA9545 mux channel 1 documented as the M.2/NVMe-MI path. Live NVMe sensor instantiation deferred to runtime (Type/Address depend on actual drive) |
 | `phosphor-power` regulator config | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no VRM/regulator I2C config; voltages are read via the AST2500 internal ADC only |
 | `bios-update` in-band hook | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no `BMC_PCH_BIOS_CS_N` SPI-mux GPIO; the X570D4I-2T uses CPU PSP for in-band BIOS flash, not BMC-mediated SPI |
-| External SPI flash + first boot | ❌ not yet attempted |
+| External SPI flash + first boot | ✅ done — multiple successful flash + boot cycles via Redfish UpdateService HttpPushUri |
+| NCT6779 SuperIO bridge daemon | ✅ added — see [06-post-flash-discoveries.md](06-post-flash-discoveries.md). 8 ExternalSensor + shell daemon publishes SYSTIN/CPUTIN/etc. into dbus |
+| SBRMI CPU temp | ❌ chip ACKs ping but driver `sbrmi_enable_alert()` write NAKed; needs driver patch or shell daemon |
+| PSU PMBus sensors | ❌ PWS-505P-1H is non-standard PMBus (auto-incrementing pointer); needs custom shell daemon analogous to NCT6779 bridge |
+| BMC fan PWM control | ❌ AST2500 PWM=255 doesn't move physical fans — board likely routes FAN1/2/3 PWM through host-owned SuperIO, not BMC |
 
 ## Provided references
 

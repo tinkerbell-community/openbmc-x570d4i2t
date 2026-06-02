@@ -48,7 +48,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,425 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -215,11 +215,22 @@ new file mode 100644
 +
 +&i2c1 {
 +	/*
-+	 * Hardware monitoring SMBus.
-+	 * Hosts both the W83773G temperature monitor and the AMD CPU's
-+	 * SB-RMI/SB-TSI (APML) interfaces — confirmed against the stock AMI
-+	 * firmware's /etc/defconfig/BMC1/1U2-X570/2T/IPMI.conf which sets
-+	 * APML_BUS_NUMBER=1 and APML2_BUS_NUMBER=1.
++	 * Hardware-monitor SMBus (HWM_SMB).
++	 *  - 0x4C: Nuvoton W83773G temperature monitor
++	 *  - 0x2D: Nuvoton NCT6779/NCT6796 family Super-I/O hardware monitor,
++	 *    accessed via its "back door" i2c interface. The host BIOS
++	 *    continues to drive the same chip via LPC (front door) and owns
++	 *    fan PWM/tach control through its built-in Smart Fan curve. The
++	 *    BMC binds nct6775-i2c read-only and surfaces SYSTIN, CPUTIN,
++	 *    AUXTIN, the X570 chipset temp (PCH_CHIP_TEMP, == "X570 Temp" on
++	 *    the stock MegaRAC), voltages, and fan RPMs into hwmon.
++	 *
++	 * NOTE: AMI's IPMI.conf labels APML_BUS_NUMBER=1, but on the
++	 * X570D4I-2T physical wiring the AMD SB-RMI is actually accessible
++	 * from the BMC on i2c2 (confirmed by i2cdetect + reading SB-RMI
++	 * Version reg 0x20 = 0x17, AMD Family 19h). MegaRAC's bus numbers
++	 * follow its own legacy convention, not the Linux aspeed-i2c probe
++	 * order. See sbrmi@3c under &i2c2 below.
 +	 */
 +	status = "okay";
 +
@@ -228,15 +239,25 @@ new file mode 100644
 +		reg = <0x4c>;
 +	};
 +
-+	sbrmi@3c {
-+		compatible = "amd,sbrmi";
-+		reg = <0x3c>;
++	nct6779@2d {
++		compatible = "nuvoton,nct6779";
++		reg = <0x2d>;
 +	};
 +};
 +
 +&i2c2 {
-+	/* PSU SMBus (PSU_SMB1) */
++	/*
++	 * AMD SB-RMI (APML) SMBus. Confirmed by reading SB-RMI Version reg
++	 * 0x20 = 0x17 (Family 19h). The bus is also reported by the playbook
++	 * as "PSU_SMB1" via AMI's IPMI.conf, but the actual device on the
++	 * production board at i2c2 0x3C is the CPU's APML slave, not a PSU.
++	 */
 +	status = "okay";
++
++	sbrmi@3c {
++		compatible = "amd,sbrmi";
++		reg = <0x3c>;
++	};
 +};
 +
 +&i2c3 {
@@ -291,6 +312,39 @@ new file mode 100644
 +
 +&i2c5 {
 +	/* SMBus on BMC connector (BMC_SMB_1) */
++	status = "okay";
++};
++
++&i2c6 {
++	/*
++	 * Host-shared SMBus per AMI's IPMI.conf (SMBUS_BUS_NUM=6). Likely
++	 * carries the host-side fan/temperature SuperIO or CPLD that the
++	 * stock BMC's pwmtach.ko configured before commanding fans through
++	 * the AST2500 PWM/Tach controller. Enabled for runtime probing
++	 * (i2cdetect) — children are added once the actual device is
++	 * identified.
++	 */
++	status = "okay";
++};
++
++&i2c9 {
++	/* Diagnostic enable — probe for unknown devices */
++	status = "okay";
++};
++
++&i2c10 {
++	status = "okay";
++};
++
++&i2c11 {
++	status = "okay";
++};
++
++&i2c12 {
++	status = "okay";
++};
++
++&i2c13 {
 +	status = "okay";
 +};
 +
@@ -368,32 +422,39 @@ new file mode 100644
 +
 +&pwm_tacho {
 +	/*
-+	 * X570D4I-2T has 3 fan headers (FAN1, FAN2, FAN3), all 4-pin.
-+	 * Verified via /api/asrr/settings/getsupportfan (only fan1..3 = 1).
++	 * X570D4I-2T has 3 fan headers (FAN1, FAN2, FAN3), all 4-pin,
++	 * verified via the stock /api/asrr/settings/getsupportfan endpoint
++	 * (only fan1..3 = 1). Pump is typically on FAN1, rad fans split
++	 * across FAN2/FAN3 via a splitter.
++	 *
++	 * NOTE: with PWM0/PWM1/PWM2 driven (V2/W2/V3) the actual fan headers
++	 * do not respond — tach reads timeout and fans don't spin. The
++	 * X570D4I-2T routes the headers through different AST2500 PWM/TACH
++	 * channels than the sibling X570D4U. To find the right mapping
++	 * without a schematic, we expose ALL 8 PWM channels and 8 tach
++	 * channels here so userspace can sweep each one against the physical
++	 * fans. Once the live mapping is identified, prune this list to the
++	 * actual FAN1/2/3 channels.
 +	 */
 +	status = "okay";
 +	pinctrl-names = "default";
 +	pinctrl-0 = <&pinctrl_pwm0_default
-+				&pinctrl_pwm1_default
-+				&pinctrl_pwm2_default>;
++		     &pinctrl_pwm1_default
++		     &pinctrl_pwm2_default
++		     &pinctrl_pwm3_default
++		     &pinctrl_pwm4_default
++		     &pinctrl_pwm5_default
++		     &pinctrl_pwm6_default
++		     &pinctrl_pwm7_default>;
 +
-+	fan@0 {
-+		/* FAN1 (4-pin) */
-+		reg = <0x00>;
-+		aspeed,fan-tach-ch = /bits/ 8 <0x00>;
-+	};
-+
-+	fan@1 {
-+		/* FAN2 (4-pin) */
-+		reg = <0x01>;
-+		aspeed,fan-tach-ch = /bits/ 8 <0x01>;
-+	};
-+
-+	fan@2 {
-+		/* FAN3 (4-pin) */
-+		reg = <0x02>;
-+		aspeed,fan-tach-ch = /bits/ 8 <0x02>;
-+	};
++	fan@0 { reg = <0x00>; aspeed,fan-tach-ch = /bits/ 8 <0x00>; };
++	fan@1 { reg = <0x01>; aspeed,fan-tach-ch = /bits/ 8 <0x01>; };
++	fan@2 { reg = <0x02>; aspeed,fan-tach-ch = /bits/ 8 <0x02>; };
++	fan@3 { reg = <0x03>; aspeed,fan-tach-ch = /bits/ 8 <0x03>; };
++	fan@4 { reg = <0x04>; aspeed,fan-tach-ch = /bits/ 8 <0x04>; };
++	fan@5 { reg = <0x05>; aspeed,fan-tach-ch = /bits/ 8 <0x05>; };
++	fan@6 { reg = <0x06>; aspeed,fan-tach-ch = /bits/ 8 <0x06>; };
++	fan@7 { reg = <0x07>; aspeed,fan-tach-ch = /bits/ 8 <0x07>; };
 +};
 +
 +&adc {
