@@ -27,4 +27,6 @@ RDEPENDS:${PN}-system = " \
         phosphor-power-regulators \
         phosphor-pid-control \
         nct6779-bridge \
+        smbios-mdr \
+        ami-ipmi-oem \
         "
