@@ -54,9 +54,12 @@
 using namespace phosphor::logging;
 
 // ── NetFn constants ──────────────────────────────────────────────────────────
-static constexpr ipmi::NetFn netFnAmi32 = 0x32;  // AMI MDR (confirmed)
-static constexpr ipmi::NetFn netFnAmi3A = 0x3A;  // AMI OEM (sensors/board)
-static constexpr ipmi::NetFn netFnOem2E = 0x2E;  // Intel OEM (Group Extension)
+// Only register on NetFns confirmed to be used by the AMI BIOS.
+// DO NOT register on 0x2E (Intel Group Extension) — ipmid has built-in
+// handlers there with specific calling conventions; overriding them with our
+// generic std::vector<uint8_t> handlers corrupts the dispatch table (SEGV).
+static constexpr ipmi::NetFn netFnAmi32 = 0x32;  // AMI MDR (confirmed in logs)
+static constexpr ipmi::NetFn netFnAmi3A = 0x3A;  // AMI OEM (early log captures)
 
 // ── Command IDs (confirmed from live X570D4I-2T POST captures + Intel MDR-v2 spec) ──
 //
@@ -192,8 +195,13 @@ static void triggerMdrSync()
 static ipmi::RspType<>
 handlerMdrGetBlock(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: Cmd 0x72 GetBlock (poll)",
-                     entry("REQ=%s", hexDump(req).c_str()));
+    try
+    {
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: Cmd 0x72 GetBlock (poll)",
+                         entry("REQ=%s", dump.c_str()));
+    }
+    catch (...) {}
     // Return "out of space / no data" so BIOS proceeds to push its tables.
     return ipmi::responseOutOfSpace();
 }
@@ -208,27 +216,38 @@ handlerMdrGetBlock(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 static ipmi::RspType<>
 handlerMdrSendBlock(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> chunk)
 {
-    if (g_state == MdrState::Idle)
+    try
     {
-        log<level::INFO>("ami-ipmi-oem: Cmd 0x3D SendDataBlock — auto-begin session");
-        g_smbiosBuf.clear();
-        g_smbiosBuf.reserve(65536);
-        g_expected = 0;
-        g_state    = MdrState::Open;
+        if (g_state == MdrState::Idle)
+        {
+            log<level::INFO>("ami-ipmi-oem: Cmd 0x3D SendDataBlock — auto-begin session");
+            g_smbiosBuf.clear();
+            g_smbiosBuf.reserve(65536);
+            g_expected = 0;
+            g_state    = MdrState::Open;
+        }
+
+        if (chunk.empty())
+            return ipmi::responseReqDataLenInvalid();
+
+        size_t preview = std::min(chunk.size(), size_t{16});
+        std::string first16 = hexDump(
+            std::vector<uint8_t>(chunk.begin(), chunk.begin() + preview));
+        log<level::INFO>("ami-ipmi-oem: Cmd 0x3D SendDataBlock",
+                         entry("CHUNK=%zu TOTAL=%zu FIRST16=%s",
+                               chunk.size(),
+                               g_smbiosBuf.size() + chunk.size(),
+                               first16.c_str()));
+
+        g_smbiosBuf.insert(g_smbiosBuf.end(), chunk.begin(), chunk.end());
+        g_state = MdrState::Receiving;
     }
-
-    log<level::INFO>("ami-ipmi-oem: Cmd 0x3D SendDataBlock",
-                     entry("CHUNK=%zu", chunk.size()),
-                     entry("TOTAL=%zu", g_smbiosBuf.size() + chunk.size()),
-                     entry("FIRST16=%s", hexDump(
-                         std::vector<uint8_t>(chunk.begin(),
-                             chunk.begin() + std::min(chunk.size(), size_t{16}))).c_str()));
-
-    if (chunk.empty())
-        return ipmi::responseReqDataLenInvalid();
-
-    g_smbiosBuf.insert(g_smbiosBuf.end(), chunk.begin(), chunk.end());
-    g_state = MdrState::Receiving;
+    catch (const std::exception& e)
+    {
+        log<level::ERR>("ami-ipmi-oem: SendDataBlock exception",
+                        entry("ERR=%s", e.what()));
+        return ipmi::responseUnspecifiedError();
+    }
     return ipmi::responseSuccess();
 }
 
@@ -241,22 +260,32 @@ handlerMdrSendBlock(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> chunk)
 static ipmi::RspType<uint8_t>
 handlerMdrSendDir(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: Cmd 0x5D SendDir/DataDone",
-                     entry("LEN=%zu", req.size()),
-                     entry("REQ=%s", hexDump(req).c_str()),
-                     entry("BUFSIZE=%zu", g_smbiosBuf.size()));
-
-    if (g_state == MdrState::Receiving)
+    try
     {
-        bool ok = writeSmbiosFile();
-        if (ok)
-            triggerMdrSync();
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: Cmd 0x5D SendDir/DataDone",
+                         entry("LEN=%zu BUFSIZE=%zu REQ=%s",
+                               req.size(), g_smbiosBuf.size(), dump.c_str()));
+
+        if (g_state == MdrState::Receiving)
+        {
+            bool ok = writeSmbiosFile();
+            if (ok)
+                triggerMdrSync();
+            g_state    = MdrState::Idle;
+            g_expected = 0;
+            return ok ? ipmi::responseSuccess(uint8_t{0x00})
+                      : ipmi::responseUnspecifiedError();
+        }
+    }
+    catch (const std::exception& e)
+    {
+        log<level::ERR>("ami-ipmi-oem: SendDir exception",
+                        entry("ERR=%s", e.what()));
         g_state    = MdrState::Idle;
         g_expected = 0;
-        return ok ? ipmi::responseSuccess(uint8_t{0x00})
-                  : ipmi::responseUnspecifiedError();
+        return ipmi::responseUnspecifiedError();
     }
-
     // Not in Receiving state — just acknowledge so BIOS can continue.
     return ipmi::responseSuccess(uint8_t{0x00});
 }
@@ -267,8 +296,13 @@ handlerMdrSendDir(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 static ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t, uint8_t>
 handlerMdrAgentStatus(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: Cmd 0x30 AgentStatus",
-                     entry("REQ=%s", hexDump(req).c_str()));
+    try
+    {
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: Cmd 0x30 AgentStatus",
+                         entry("REQ=%s", dump.c_str()));
+    }
+    catch (...) {}
     return ipmi::responseSuccess(
         uint8_t{0x01},   // mdrVersion
         uint8_t{0x01},   // agentVersion
@@ -284,8 +318,13 @@ handlerMdrAgentStatus(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 static ipmi::RspType<std::vector<uint8_t>>
 handlerMdrGetDir(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: Cmd 0x31 GetDir",
-                     entry("REQ=%s", hexDump(req).c_str()));
+    try
+    {
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: Cmd 0x31 GetDir",
+                         entry("REQ=%s", dump.c_str()));
+    }
+    catch (...) {}
 
     std::vector<uint8_t> rsp;
     rsp.reserve(3 + 17);
@@ -307,8 +346,13 @@ handlerMdrGetDir(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 static ipmi::RspType<uint8_t>
 handlerMdrDataBegin(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: DataBegin",
-                     entry("REQ=%s", hexDump(req).c_str()));
+    try
+    {
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: DataBegin",
+                         entry("REQ=%s", dump.c_str()));
+    }
+    catch (...) {}
     uint32_t declared = 0;
     if (req.size() >= 4)
         std::memcpy(&declared, req.data(), 4);
@@ -326,9 +370,13 @@ handlerMdrDataBegin(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 static ipmi::RspType<uint8_t>
 handlerMdrDataEnd(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> req)
 {
-    log<level::INFO>("ami-ipmi-oem: DataEnd",
-                     entry("REQ=%s", hexDump(req).c_str()),
-                     entry("TOTAL=%zu", g_smbiosBuf.size()));
+    try
+    {
+        std::string dump = hexDump(req);
+        log<level::INFO>("ami-ipmi-oem: DataEnd",
+                         entry("TOTAL=%zu REQ=%s", g_smbiosBuf.size(), dump.c_str()));
+    }
+    catch (...) {}
     if (g_state == MdrState::Idle)
     {
         log<level::WARNING>("ami-ipmi-oem: DataEnd with no active session");
@@ -355,7 +403,7 @@ static void registerAmiIpmiOem()
                               ipmi::Privilege::Admin, fn);
     };
 
-    for (auto nf : {netFnAmi32, netFnAmi3A, netFnOem2E})
+    for (auto nf : {netFnAmi32, netFnAmi3A})
     {
         // ── Confirmed observed commands ────────────────────────────────────
         reg(nf, cmdMdrGetBlock,    handlerMdrGetBlock);    // 0x72 poll
