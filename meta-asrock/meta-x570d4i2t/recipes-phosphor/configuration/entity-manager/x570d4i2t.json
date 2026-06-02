@@ -205,28 +205,6 @@
         },
         {
             "EntityId": 29,
-            "EntityInstance": 1,
-            "MaxValue": 25000,
-            "MinValue": 0,
-            "Name": "SuperIO Fan 1",
-            "PowerState": "On",
-            "Timeout": 30,
-            "Type": "ExternalSensor",
-            "Units": "RPMS"
-        },
-        {
-            "EntityId": 29,
-            "EntityInstance": 2,
-            "MaxValue": 25000,
-            "MinValue": 0,
-            "Name": "SuperIO Fan 2",
-            "PowerState": "On",
-            "Timeout": 30,
-            "Type": "ExternalSensor",
-            "Units": "RPMS"
-        },
-        {
-            "EntityId": 29,
             "EntityInstance": 10,
             "MaxValue": 25000,
             "MinValue": 0,

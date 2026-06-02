@@ -28,8 +28,10 @@ INTERVAL=5
 # Indices follow nct6775 driver labels for NCT6779D-family chips:
 #   temp1 = SYSTIN     | temp9  = PCH_CPU_TEMP
 #   temp2 = CPUTIN     | temp10 = PCH_MCH_TEMP
-#   temp3 = AUXTIN0    | fan1, fan2 = the chip's two routed tach inputs (unwired)
+#   temp3 = AUXTIN0
 #
+# The chip's fan1/fan2 tach inputs are unwired on this board, so we don't
+# publish them.
 # X570 Temp itself comes from the W83773G remote-1 diode (reads ~70 C), not
 # from NCT6779 temp8 PCH_CHIP_TEMP (that channel reads 0 without LPC init).
 TEMP_PATHS="\
@@ -38,10 +40,6 @@ temp2_input:CPUTIN \
 temp3_input:AUXTIN \
 temp9_input:PCH_CPU_Temp \
 temp10_input:PCH_MCH_Temp"
-
-FAN_PATHS="\
-fan1_input:SuperIO_Fan_1 \
-fan2_input:SuperIO_Fan_2"
 
 find_hwmon() {
     for h in /sys/class/hwmon/hwmon*; do
@@ -90,17 +88,6 @@ publish() {
         fi
         val=$(awk -v r="$raw" 'BEGIN{printf "%.3f", r/1000}')
         set_value "/xyz/openbmc_project/sensors/temperature/$name" "$val"
-    done
-    for entry in $FAN_PATHS; do
-        sysfs="${entry%%:*}"
-        name="${entry##*:}"
-        raw=$(cat "$HW/$sysfs" 2>/dev/null) || continue
-        [ -z "$raw" ] && continue
-        # 0 RPM is meaningful (fan stopped); negative / huge values are not.
-        if [ "$raw" -lt 0 ] || [ "$raw" -gt 100000 ]; then
-            continue
-        fi
-        set_value "/xyz/openbmc_project/sensors/fan_tach/$name" "$raw.0"
     done
 }
 
