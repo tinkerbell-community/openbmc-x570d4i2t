@@ -29,4 +29,5 @@ RDEPENDS:${PN}-system = " \
         nct6779-bridge \
         smbios-mdr \
         ami-ipmi-oem \
+        host-smbios-push \
         "
