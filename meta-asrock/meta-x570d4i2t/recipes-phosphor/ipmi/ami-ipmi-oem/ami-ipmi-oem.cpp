@@ -212,19 +212,49 @@ handlerMdrAgentStatus(ipmi::Context::ptr /*ctx*/,
 // ────────────────────────────────────────────────────────────────────────────
 // Cmd 0x5D  MdrIIGetDirectory
 //
-// BIOS queries which MDR regions the BMC has stored.
-// We report no entries so BIOS knows it must push fresh data.
+// BIOS queries which MDR regions the BMC supports/needs.
+// We report 1 entry: SMBIOS region (type=0x01) with updateRequired=1 so the
+// BIOS knows to proceed with the DataStart→DataBlock→DataDone transfer.
+//
+// Entry layout (17 bytes following the 3-byte header):
+//   regionId(1) regionType(1) timestamp(4) dataChecksum(1) hdrChecksum(1)
+//   validDataSize(4) maxDataSize(4) updateCount(1) xferType(1) dataSetHandle(1)
+//   updateRequired(1) — some AMI stacks omit the last two fields; we include
+//   the canonical 17-byte form.
 // ────────────────────────────────────────────────────────────────────────────
-static ipmi::RspType<uint8_t, uint8_t, uint8_t>
+static ipmi::RspType<std::vector<uint8_t>>
 handlerMdrGetDir(ipmi::Context::ptr /*ctx*/, uint8_t dirIndex)
 {
     log<level::INFO>("ami-ipmi-oem: Cmd 0x5D MdrGetDirectory",
                      entry("IDX=%u", dirIndex));
-    return ipmi::responseSuccess(
-        uint8_t{0x00},   // dirVersion
-        uint8_t{0x00},   // dirEntries (0 = nothing cached)
-        uint8_t{0x00}    // remaining
-    );
+
+    std::vector<uint8_t> rsp;
+    rsp.reserve(3 + 17);
+
+    // Header: dirVersion, dirEntries, dataSetHandle / remaining
+    rsp.push_back(0x01);  // dirVersion
+    rsp.push_back(0x01);  // 1 entry
+    rsp.push_back(0x00);  // remaining after this response
+
+    // Entry 0: SMBIOS region descriptor
+    rsp.push_back(0x00);  // regionId = 0
+    rsp.push_back(0x01);  // regionType = 0x01 (SMBIOS)
+    // timestamp (4 bytes LE) — 0 means "not valid / needs update"
+    rsp.push_back(0x00); rsp.push_back(0x00);
+    rsp.push_back(0x00); rsp.push_back(0x00);
+    rsp.push_back(0x00);  // dataChecksum
+    rsp.push_back(0x00);  // headerChecksum
+    // validDataSize (4 bytes LE) = 0
+    rsp.push_back(0x00); rsp.push_back(0x00);
+    rsp.push_back(0x00); rsp.push_back(0x00);
+    // maxDataSize (4 bytes LE) = 64 KiB
+    rsp.push_back(0x00); rsp.push_back(0x00);
+    rsp.push_back(0x01); rsp.push_back(0x00);
+    rsp.push_back(0x00);  // updateCount
+    rsp.push_back(0x00);  // xferType = 0 (full copy)
+    rsp.push_back(0x01);  // updateRequired = 1 → BIOS must push data
+
+    return ipmi::responseSuccess(rsp);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
