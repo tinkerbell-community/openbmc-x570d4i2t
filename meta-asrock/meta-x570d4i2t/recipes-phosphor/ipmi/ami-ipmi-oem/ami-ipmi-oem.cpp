@@ -56,6 +56,7 @@ using namespace phosphor::logging;
 // ── NetFn constants ──────────────────────────────────────────────────────────
 static constexpr ipmi::NetFn netFnAmi32 = 0x32;  // AMI MDR (confirmed)
 static constexpr ipmi::NetFn netFnAmi3A = 0x3A;  // AMI OEM (sensors/board)
+static constexpr ipmi::NetFn netFnOem2E = 0x2E;  // Intel OEM (Group Extension)
 
 // ── Confirmed command IDs (live D-Bus capture, X570D4I-2T POST) ──────────────
 static constexpr ipmi::Cmd cmdMdrGetBlock   = 0x72;  // BIOS polls cached block
@@ -265,11 +266,17 @@ handlerMdrDataWrite(ipmi::Context::ptr /*ctx*/, std::vector<uint8_t> chunk)
                      entry("CHUNK=%zu", chunk.size()),
                      entry("TOTAL=%zu", g_smbiosBuf.size() + chunk.size()));
 
-    if (g_state != MdrState::Open && g_state != MdrState::Receiving)
+    // Auto-begin if the BIOS skipped the Begin phase (e.g. after AgentStatus
+    // the BIOS goes straight to DataWrite without sending DataBegin first).
+    if (g_state == MdrState::Idle)
     {
-        log<level::WARNING>("ami-ipmi-oem: DataWrite outside MDR session");
-        return ipmi::responseUnspecifiedError();
+        log<level::INFO>("ami-ipmi-oem: auto-begin MDR session on first DataWrite");
+        g_smbiosBuf.clear();
+        g_smbiosBuf.reserve(65536);
+        g_expected = 0;
+        g_state    = MdrState::Open;
     }
+
     if (chunk.empty())
         return ipmi::responseReqDataLenInvalid();
 
@@ -356,6 +363,28 @@ static void registerAmiIpmiOem()
     ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrWriteLeg,
                           ipmi::Privilege::Admin, handlerMdrDataWrite);
     ipmi::registerHandler(ipmi::prioOemBase, netFnAmi3A, cmdMdrEndLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
+
+    // ── NetFn 0x2E — Intel OEM / Group Extension ────────────────────────────
+    // Some AMI BIOS versions send MDR control commands here.
+    // Mirror all handlers so we catch whichever NetFn the BIOS actually uses.
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrGetBlock,
+                          ipmi::Privilege::Admin, handlerMdrGetBlock);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrAgentStat,
+                          ipmi::Privilege::Admin, handlerMdrAgentStatus);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrGetDir,
+                          ipmi::Privilege::Admin, handlerMdrGetDir);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrDataBegin,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrDataWrite,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrDataEnd,
+                          ipmi::Privilege::Admin, handlerMdrDataEnd);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrBeginLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataBegin);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrWriteLeg,
+                          ipmi::Privilege::Admin, handlerMdrDataWrite);
+    ipmi::registerHandler(ipmi::prioOemBase, netFnOem2E, cmdMdrEndLeg,
                           ipmi::Privilege::Admin, handlerMdrDataEnd);
 
     log<level::INFO>("ami-ipmi-oem: handlers registered");
