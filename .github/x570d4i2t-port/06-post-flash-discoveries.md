@@ -8,7 +8,7 @@ turned out to be wrong or incomplete; this doc captures the deltas.
 
 Stock MegaRAC's "X570 Temp", "SYSTIN", "CPUTIN", and similar host-rail sensors
 are sourced from a **Nuvoton NCT6779D-family SuperIO at i2c-1 0x2d**. Not the
-W83773G. The W83773G at 0x4c only provides MB Temp + Card Side Temp (its
+W83773G. The W83773G at 0x4c only provides CPU Temp + Card Side Temp (its
 remote-2 diode RDOS2 is open on this board, so the "X570 Temp" we tried to
 read off it always shows 0).
 
@@ -106,6 +106,118 @@ SMBus controller register space exposed by routing. Phantom-ACKs at 0x0c /
 0x28 / 0x37 are SMBus protocol artifacts, not real devices. No further
 investigation warranted.
 
+## BMC fan control — phosphor-pid-control, TWO zones (CPU + Chassis)
+
+User asked specifically for BMC-side fan control via phosphor-fan-control.
+OpenBMC has two distinct stacks; we picked **`phosphor-pid-control`** (swampd,
+entity-manager-driven) over `phosphor-fan-presence` (older YAML-config
+IBM-Witherspoon stack) — simpler, single daemon, and the upstream X570D4U
+sibling uses the same.
+
+### Board-specific fan topology (user-confirmed)
+
+- **FAN1** → AIO water-cooler radiator fan, **cools the CPU**. Controlled by `CPU Temp` (W83773G local diode, tracks CPU-area board temp on this board).
+- **FAN2** → chassis fan splitter (multiple case fans, one PWM signal), **cools the chassis / X570 chipset**. Controlled by `X570 Temp` (W83773G remote-1 diode).
+- **FAN3** → unplugged on this build. Left in entity-manager inventory but not driven by any zone; PWM 3 untouched.
+
+### Two zones, two curves
+
+Stepwise is **step-floor** (no interpolation): at temp T, output = O[ max i where R[i] ≤ T ]. So a 75/85 step pair leaves a 10°C "dead zone" at the same PWM. Curves use finer steps to avoid that.
+
+**Zone 0 "CPU Zone"** — `CPU Temp` → `Pwm_1` (AIO radiator):
+
+| Reading °C | 30 | 40 | 50 | 60 | 70 | 80 | 85 | 90 |
+|---|---|---|---|---|---|---|---|---|
+| Output % | 30 | 40 | 50 | 65 | 80 | 95 | 100 | 100 |
+
+**Zone 1 "Chassis Zone"** — `X570 Temp` → `Pwm_2` (chassis fans):
+
+| Reading °C | 30 | 40 | 50 | 60 | 65 | 70 | 75 | 80 |
+|---|---|---|---|---|---|---|---|---|
+| Output % | 30 | 40 | 55 | 70 | 80 | 90 | 100 | 100 |
+
+NegativeHysteresis = 2°C on both (PWM steps down only when temp drops 2°C below the threshold — avoids fan-speed thrashing).
+
+The chassis curve is more aggressive because the X570 chipset runs hot and the W83773G's remote diode is what we have visibility into. The CPU curve allows lower noise at idle since the AIO has thermal mass.
+
+### Config artifacts
+
+- `phosphor-pid-control` added to `packagegroup-asrock-apps` RDEPENDS so swampd ships in the image
+- Two `"Type": "Pid.Zone"` entries (CPU Zone idx 0, Chassis Zone idx 1)
+- Two `"Type": "Stepwise"` curves
+- Two `"Type": "Pid"` Class:"fan" entries (CPU Fans → Pwm_1, Chassis Fans → Pwm_2), FFGain 1.0 / all other coeffs 0 (pass-through)
+- 3 `"Type": "AspeedFan"` (FAN1/2/3) — Connector.Pwm 0/1/2
+
+### Verified end-to-end (2026-06-01)
+
+With X570 Temp = 78°C and CPU Temp = 63°C:
+
+- swampd: `Zone 0 fans, returning to normal mode, output pwm: 65` (CPU)
+- swampd: `Zone 1 fans, returning to normal mode, output pwm: 100` (Chassis)
+- `/sys/class/hwmon/hwmon1/pwm1 = 165` (= 65% × 255)
+- `/sys/class/hwmon/hwmon1/pwm2 = 255` (= 100% × 255)
+- `/sys/class/hwmon/hwmon1/pwm3 = 255` (stale, not driven by any zone)
+- Over 3 min, chassis dropped 0.75°C while CPU held steady at 62°C
+
+### swampd "fan" Pid hard-requires tach feedback — fake-tach workaround
+
+phosphor-pid-control's Class:"fan" controller refuses to leave failsafe
+(PWM=100%) unless every Input tach sensor publishes a valid reading. The
+`MissingIsAcceptable` and `InputUnavailableAsFailed` options are **silently
+ignored** for "fan" class (dispatcher checks `pidClass != "fan"` before
+applying them — `dbus/dbusconfiguration.cpp:786`).
+
+This board's chassis fan headers (FAN1/2/3) don't seem to wire tach back to
+AST2500 — `cat /sys/class/hwmon/hwmon1/fan1_input` returns "Connection timed
+out". So the natural fan-tach Inputs all read NaN and swampd stays in
+failsafe at PWM=255 forever.
+
+**Workaround**: three `ExternalSensor` stanzas (`FanTach1`, `FanTach2`,
+`FanTach3`, Units RPMS, PowerState Always) + extend the nct6779-bridge
+daemon to `busctl set-property` a constant `1500.0` to each every 5 seconds.
+The Pid "fan" Inputs point at these synthetic tachs. Setpoint is purely
+feed-forward (FFGain=1, no I/D/P) so the constant value doesn't perturb the
+math — it just satisfies swampd's "must have readings" gate.
+
+```sh
+publish_fake_tachs() {
+    for n in 1 2 3; do
+        busctl set-property xyz.openbmc_project.ExternalSensor \
+            "/xyz/openbmc_project/sensors/fan_tach/FanTach$n" \
+            xyz.openbmc_project.Sensor.Value Value d 1500.0
+    done
+}
+```
+
+The `FanTach1..3` objects show up in Redfish as fan sensors at 1500 RPM,
+which is misleading. The clean fix is a swampd source patch that respects
+MissingIsAcceptable on "fan" class — until then, the workaround is in
+place.
+
+## bmcweb HTTP body limit — 30 MB default chokes our 67 MB BMC tarball
+
+The Redfish HttpPushUri (`/redfish/v1/UpdateService/update`) and
+MultipartHttpPushUri (`/redfish/v1/UpdateService/update-multipart`) flows
+both go through bmcweb, which has a meson `http-body-limit` option defaulting
+to **30 MB**. Our BMC image .all.tar is 67 MB, so the upload is silently
+truncated. phosphor-software-manager pipes the body to `tar -x -f -` and
+sees "invalid tar magic" because the body is incomplete.
+
+Fix: `meta-asrock/meta-x570d4i2t/recipes-phosphor/interfaces/bmcweb_%.bbappend`
+sets `-Dhttp-body-limit=512` (max upstream value). Chicken-and-egg: applying
+the fix requires a successful flash, but the broken HttpPushUri prevents that.
+
+**Dev-flash shortcut**: `scp` the .all.tar to `/tmp/update.tar` on the BMC,
+extract it (`tar x` to /tmp/extract/), then `flashcp -v
+/tmp/extract/image-bmc /dev/mtd0`. flashcp will report a verification
+mismatch ~58 MB into the 64 MB image — that's inside the jffs2 rwfs region
+(mtd5), which is being actively written by the running OS. The mismatch is
+harmless: u-boot / u-boot-env / kernel / rofs (mtd1-4, the first 42 MB) are
+written and verified correctly. Reboot picks up the new firmware.
+
+After bmcweb itself is updated with the larger limit, Redfish UpdateService
+becomes usable again.
+
 ## Physical fan control still not working from BMC
 
 User has water cooler + multiple chassis fans physically installed.
@@ -160,6 +272,6 @@ stock. Chassis fans (FAN1/2/3 headers) are the AST2500-side tachs, separate.
 | Source | Count | Sensors |
 |---|---|---|
 | AST2500 iio_hwmon ADCs | 13 | 3VSB, 5VSB, VCPU, VSOC, VCCM, APU_VDDP, PM_VDD_CLDO, PM_VDDCR_S5, PM_VDDCR, BAT, 3V, 5V, 12V |
-| W83773G hwmon | 2 | MB Temp, Card Side Temp |
+| W83773G hwmon | 2 | CPU Temp, X570 Temp |
 | NCT6779 bridge (ExternalSensor) | 8 | SYSTIN, CPUTIN, AUXTIN, X570_Temp, PCH_CPU_Temp, PCH_MCH_Temp, SuperIO_Fan_1, SuperIO_Fan_2 |
 | Total | 23 | (CPU_Temp from SBRMI broken; PSU sensors require custom daemon) |

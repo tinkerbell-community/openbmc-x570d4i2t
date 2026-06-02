@@ -25,5 +25,6 @@ RDEPENDS:${PN}-system = " \
         phosphor-host-postd \
         phosphor-post-code-manager \
         phosphor-power-regulators \
+        phosphor-pid-control \
         nct6779-bridge \
         "

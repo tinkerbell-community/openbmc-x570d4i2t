@@ -14,3 +14,9 @@
 # be reverted.
 
 PACKAGECONFIG:remove = "http-zstd"
+
+# Default 30 MB upstream HTTP body limit is too small for our 64 MB BMC image
+# tarball uploaded via Redfish UpdateService HttpPushUri / MultipartHttpPushUri.
+# Bump to the upstream meson-options max (512 MB) so the firmware push
+# endpoint accepts the full image without a 30 MB silent truncation.
+EXTRA_OEMESON:append = " -Dhttp-body-limit=512"

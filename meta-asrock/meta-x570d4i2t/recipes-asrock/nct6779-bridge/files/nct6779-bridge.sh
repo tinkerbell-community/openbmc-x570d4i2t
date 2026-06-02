@@ -104,11 +104,23 @@ publish() {
     done
 }
 
+publish_fake_tachs() {
+    # phosphor-pid-control's "fan" PID class hard-requires every Input tach
+    # to publish a reading; missing/NaN forces the zone into failsafe (max
+    # PWM) regardless of MissingIsAcceptable / InputUnavailableAsFailed.
+    # The X570D4I-2T's fan headers don't wire tach back to AST2500 tach
+    # pins, so we feed swampd constant fake RPMs via ExternalSensor objects
+    # to keep both zones out of failsafe while the temperature curves run.
+    set_value /xyz/openbmc_project/sensors/fan_tach/FanTach_CPU "1500.0"
+    set_value /xyz/openbmc_project/sensors/fan_tach/FanTach_Chassis "1500.0"
+}
+
 while true; do
     ensure_device
     HW=$(find_hwmon || true)
     if [ -n "$HW" ]; then
         publish "$HW"
     fi
+    publish_fake_tachs
     sleep "$INTERVAL"
 done
