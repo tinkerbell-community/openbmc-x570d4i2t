@@ -10,11 +10,11 @@ LIC_FILES_CHKSUM = "file://${COREBASE}/meta/files/common-licenses/Apache-2.0;md5
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
 SRC_URI = " \
-    file://CMakeLists.txt \
-    file://ami-ipmi-oem.cpp \
+    file://CMakeLists.txt;subdir=${BP} \
+    file://ami-ipmi-oem.cpp;subdir=${BP} \
 "
 
-S = "${WORKDIR}"
+S = "${UNPACKDIR}/${BP}"
 
 DEPENDS = " \
     boost \
@@ -28,7 +28,14 @@ inherit cmake pkgconfig obmc-phosphor-ipmiprovider-symlink
 
 # Library name produced by cmake; the obmc-phosphor-ipmiprovider-symlink class
 # creates /usr/lib/ipmid-providers/libami-ipmi-oem.so → ../libami-ipmi-oem.so
+FILES:${PN} += " \
+    ${libdir}/ipmid-providers/lib*${SOLIBS} \
+    ${libdir}/host-ipmid/lib*${SOLIBS} \
+"
+FILES:${PN}-dev += " \
+    ${libdir}/ipmid-providers/lib*${SOLIBSDEV} \
+    ${libdir}/ipmid-providers/*.la \
+"
+
 LIBRARY_NAMES = "libami-ipmi-oem.so"
 HOSTIPMI_PROVIDER_LIBRARY += "${LIBRARY_NAMES}"
-
-FILES:${PN} += "${libdir}/ipmid-providers/*.so"

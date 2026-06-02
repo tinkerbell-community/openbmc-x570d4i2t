@@ -125,7 +125,7 @@ static bool writeSmbiosFile()
 
 static void triggerMdrSync()
 {
-    auto bus = ipmi::getSdBus();
+    auto bus = getSdBus();
     try
     {
         auto method = bus->new_method_call(kMdrService, kMdrObjPath,
