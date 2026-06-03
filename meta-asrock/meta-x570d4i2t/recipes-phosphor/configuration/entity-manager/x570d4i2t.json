@@ -264,6 +264,13 @@
         },
 
         {
+            "Address": "0x38",
+            "Bus": 2,
+            "Name": "PSU FRU",
+            "Type": "IPMI_FRU"
+        },
+
+        {
             "Address": "0x70",
             "Bus": 4,
             "ChannelNames": [
