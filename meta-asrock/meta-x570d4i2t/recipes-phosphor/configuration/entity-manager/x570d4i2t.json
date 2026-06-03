@@ -227,15 +227,6 @@
         },
 
         {
-            "Address": "0x38",
-            "Bus": 2,
-            "Labels": ["vin", "vout1", "iin", "iout1", "pin", "pout1", "temp1", "temp2", "fan1", "fan2"],
-            "Name": "PSU",
-            "PowerState": "Always",
-            "Type": "pmbus"
-        },
-
-        {
             "Connector": {
                 "Name": "FAN1",
                 "Pwm": 0,

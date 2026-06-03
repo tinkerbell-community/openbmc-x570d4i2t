@@ -66,7 +66,6 @@ constexpr ipmi::Cmd kCmdAmiSetChunk = 0xB5;
 constexpr uint8_t kRegionSmbios = 0;
 constexpr uint8_t kRegionMeta = 1;
 
-constexpr size_t kMaxReadChunk = 4096;
 
 // 0xB5 chunk-flag bits per X570D4I-2T BIOS spec.
 constexpr uint8_t kChunkFlagStart = 0x01;
@@ -111,18 +110,33 @@ uint32_t g_amiCursor = 0;
 uint32_t g_amiStringIndex = 0;
 std::vector<std::string> g_amiPushedStrings;
 
+// 0xB5 SetSmbiosChunk call index — increments with each 0xB5 received and is
+// used to look up which SMBIOS string slot to write into. The BIOS sends the
+// same identifier ("X570D4I-2T") multiple times in succession to populate
+// several related SMBIOS string slots; the call index lets us route each to
+// the correct (Type, string#) slot.
+struct StringSlot {
+  uint8_t  smbiosType;
+  uint8_t  stringIndex;   // 1-based
+  const char* label;
+};
+constexpr StringSlot kAmiSlotTable[] = {
+  { 1, 1, "Type1.SystemManufacturer" },
+  { 1, 2, "Type1.SystemProductName" },
+  { 2, 1, "Type2.BoardManufacturer" },
+  { 2, 2, "Type2.BoardProductName" },
+};
+constexpr size_t kNumAmiSlots =
+    sizeof(kAmiSlotTable) / sizeof(kAmiSlotTable[0]);
+size_t g_amiCallIndex = 0;
+
 // In-memory working copy of the SMBIOS payload (raw bytes, no MDR or AMI
 // header). Initialised at library-load time from the converter's view of
 // /var/lib/smbios/smbios2.
 std::vector<uint8_t> g_amiBuf;
 
-// Per-region read cursor for 0x72 MdrGetBlock. The command behaves like TFTP:
-// each successful call returns the next kMaxReadChunk bytes and advances the
-// cursor by that many. An incoming offset of 0 resets the cursor (start of a
-// new transfer). Reaching end-of-stream returns an empty chunk and resets the
-// cursor so the next offset=0 starts cleanly.
+// Number of distinct regions we route 0x71/0x72 against.
 constexpr size_t kNumRegions = 4;
-uint32_t g_mdrReadCursor[kNumRegions] = {0, 0, 0, 0};
 
 // Hex-dump up to `maxBytes` of `data` as "AA BB CC ..." into a heap string.
 std::string hexDump(const std::vector<uint8_t> &data, size_t maxBytes = 64) {
@@ -292,57 +306,195 @@ ipmi::RspType<std::vector<uint8_t>> hMdrRegionStatus(ipmi::Context::ptr,
   return ipmi::responseSuccess(rsp);
 }
 
-// 0x72 MdrGetBlock — TFTP-style sequential reader.
+// Replace string N (1-based) inside the SMBIOS structure of `type` in `buf`
+// with `newStr`. The string area is the variable-length region after the
+// formatted area (offset +Length) and ending at the double-NUL terminator.
+// Resizes `buf` in place when the new string differs in length.
+// Returns true on success.
+bool replaceSmbiosString(std::vector<uint8_t>& buf, uint8_t type,
+                          uint8_t stringIndex,
+                          const std::string& newStr);
+
+// Find the byte offset of the first SMBIOS structure of `type` in `buf`.
+// Returns SIZE_MAX if not found.
 //
-// The client passes (region, offset). offset == 0 is treated as "start a new
-// transfer" and resets our per-region cursor. Any other offset is honoured if
-// it equals the current cursor; mismatches log a warning and seek the cursor
-// to the requested position. Each call returns the next kMaxReadChunk bytes
-// from the (possibly seek-adjusted) cursor and advances the cursor by that
-// many bytes. End-of-stream returns an empty payload and resets the cursor.
+// SMBIOS layout inside `buf` (the raw payload, no MDR/AMI header):
+//   bytes 0..23: _SM3_ anchor (24 bytes for SMBIOS 3.0; older _SM_ is 31)
+//   bytes 24..:  structure table: each entry is
+//                  [ Type:1, Length:1, Handle:2, formatted fields..., strings, 0x00, 0x00 ]
+//                Length covers the formatted portion; the trailing strings end
+//                with a double-NUL terminator.
+size_t findSmbiosStructOffset(const std::vector<uint8_t>& buf, uint8_t type) {
+  size_t pos = 0;
+  if (buf.size() >= 5 && buf[0] == '_' && buf[1] == 'S' && buf[2] == 'M' &&
+      buf[3] == '3' && buf[4] == '_') {
+    pos = 24;  // _SM3_ anchor is 24 bytes
+  } else if (buf.size() >= 4 && buf[0] == '_' && buf[1] == 'S' &&
+             buf[2] == 'M' && buf[3] == '_') {
+    pos = 31;  // _SM_ anchor is 31 bytes
+  }
+  while (pos + 4 <= buf.size()) {
+    uint8_t structType = buf[pos];
+    uint8_t structLen  = buf[pos + 1];
+    if (structLen < 4) {
+      break;
+    }
+    if (structType == type) {
+      return pos;
+    }
+    if (structType == 127) {
+      break;  // end-of-table marker
+    }
+    // Advance past formatted area + string area (ends with two NUL bytes).
+    size_t end = pos + structLen;
+    while (end + 1 < buf.size() && !(buf[end] == 0 && buf[end + 1] == 0)) {
+      end++;
+    }
+    end += 2;
+    if (end > buf.size()) {
+      break;
+    }
+    pos = end;
+  }
+  return SIZE_MAX;
+}
+
+bool replaceSmbiosString(std::vector<uint8_t>& buf, uint8_t type,
+                          uint8_t stringIndex, const std::string& newStr) {
+  if (stringIndex == 0) {
+    return false;
+  }
+  size_t structOff = findSmbiosStructOffset(buf, type);
+  if (structOff == SIZE_MAX) {
+    LOG_WARN("replaceSmbiosString: Type %u not found", type);
+    return false;
+  }
+  uint8_t structLen = buf[structOff + 1];
+  size_t stringAreaStart = structOff + structLen;
+  if (stringAreaStart > buf.size()) {
+    return false;
+  }
+
+  // Walk to string at stringIndex (1-based).
+  size_t pos = stringAreaStart;
+  size_t curIdx = 1;
+  size_t targetStart = SIZE_MAX;
+  size_t targetEnd = SIZE_MAX;
+  while (pos < buf.size()) {
+    if (buf[pos] == 0) {
+      // Either end-of-strings (if previous byte was also 0) or null between
+      // strings.
+      if (pos + 1 < buf.size() && buf[pos + 1] == 0 && pos == stringAreaStart) {
+        // String area is empty: no strings present, can't insert a specific
+        // index.
+        LOG_WARN("replaceSmbiosString: Type %u has empty string area",
+                 type);
+        return false;
+      }
+      // pos == end of current string
+      if (curIdx == stringIndex) {
+        targetEnd = pos;
+        break;
+      }
+      ++curIdx;
+      ++pos;
+      if (pos < buf.size() && buf[pos] == 0) {
+        // Reached double-NUL; index not present, append before terminator.
+        targetStart = pos;
+        targetEnd   = pos;
+        break;
+      }
+      // pos now begins the next string
+      if (curIdx == stringIndex) {
+        targetStart = pos;
+      }
+      continue;
+    }
+    if (curIdx == stringIndex && targetStart == SIZE_MAX) {
+      targetStart = pos;
+    }
+    ++pos;
+  }
+  if (curIdx == stringIndex && targetStart != SIZE_MAX &&
+      targetEnd == SIZE_MAX) {
+    targetEnd = pos;
+  }
+  if (targetStart == SIZE_MAX || targetEnd == SIZE_MAX) {
+    LOG_WARN("replaceSmbiosString: Type %u string #%u not addressable "
+             "(pos=%zu curIdx=%zu)",
+             type, stringIndex, pos, curIdx);
+    return false;
+  }
+
+  // Replace bytes [targetStart, targetEnd) with newStr.
+  size_t oldLen = targetEnd - targetStart;
+  size_t newLen = newStr.size();
+  if (newLen == oldLen) {
+    std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+  } else if (newLen < oldLen) {
+    std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+    buf.erase(buf.begin() + targetStart + newLen,
+              buf.begin() + targetEnd);
+  } else {
+    size_t growBy = newLen - oldLen;
+    buf.insert(buf.begin() + targetEnd, growBy, 0);
+    std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+  }
+  return true;
+}
+
+// 0x72 MdrGetBlock — bulk reader, single-purpose per region.
+//
+//   region=0 (kRegionSmbios) → SMBIOS payload slice g_amiBuf[offset..]
+//     g_amiBuf is the raw _SM3_ anchor + structure table with no AMI or MDR
+//     header. Returns all bytes from `offset` to the end of the buffer.
+//     BIOS issues successive calls with increasing offsets; an offset past the
+//     end returns an empty response signalling EOF.
+//
+//   region=1 (kRegionMeta) → AmiMdrHeader slice hdr[offset..]
+//     hdr = [ dataSize:2 LE, checksum:2 LE ] (4 bytes), built fresh from
+//     g_amiBuf so size+checksum always reflect the current working buffer.
+//     Returns all header bytes from `offset` to the end of the header.
 ipmi::RspType<std::vector<uint8_t>>
-hMdrGetBlock(ipmi::Context::ptr, uint8_t regionId, uint16_t offset) {
-  if (regionId >= kNumRegions) {
-    LOG_WARN("Cmd 0x72 MdrGetBlock unknown region=%u — empty response",
-             regionId);
-    return ipmi::responseSuccess(std::vector<uint8_t>{});
+hMdrGetBlock(ipmi::Context::ptr ctx, uint8_t regionId,
+             uint16_t offset) {
+  LOG_INFO("Cmd 0x72 MdrGetBlock netfn=0x%02X channel=%u region=%u "
+           "offset=0x%04X (g_amiBuf=%zu)",
+           ctx ? static_cast<uint8_t>(ctx->netFn) : 0,
+           ctx ? static_cast<uint8_t>(ctx->channel) : 0,
+           regionId, offset, g_amiBuf.size());
+
+  if (regionId == kRegionSmbios) {
+    if (offset >= g_amiBuf.size()) {
+      LOG_INFO("0x72 region=0 offset=0x%04X past end (%zu) → empty",
+               offset, g_amiBuf.size());
+      return ipmi::responseSuccess(std::vector<uint8_t>{});
+    }
+    std::vector<uint8_t> slice(g_amiBuf.begin() + offset, g_amiBuf.end());
+    LOG_INFO("0x72 region=0 offset=0x%04X → %zu bytes", offset, slice.size());
+    return ipmi::responseSuccess(slice);
   }
 
-  auto view = ami::amiViewFromCache();
   if (regionId == kRegionMeta) {
-    // Region 1 exposes just the 4-byte AmiMdrHeader prefix.
-    view.resize(std::min(view.size(), sizeof(ami::AmiMdrHeader)));
+    ami::AmiMdrHeader hdr{};
+    hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
+    hdr.checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+    uint8_t hdrBytes[sizeof(hdr)];
+    std::memcpy(hdrBytes, &hdr, sizeof(hdr));
+    if (offset >= sizeof(hdrBytes)) {
+      LOG_INFO("0x72 region=1 offset=0x%04X past end (%zu) → empty",
+               offset, sizeof(hdrBytes));
+      return ipmi::responseSuccess(std::vector<uint8_t>{});
+    }
+    std::vector<uint8_t> slice(hdrBytes + offset,
+                               hdrBytes + sizeof(hdrBytes));
+    LOG_INFO("0x72 region=1 offset=0x%04X → %zu bytes (AmiMdrHeader)",
+             offset, slice.size());
+    return ipmi::responseSuccess(slice);
   }
 
-  uint32_t& cursor = g_mdrReadCursor[regionId];
-
-  // offset==0 always starts a new transfer.
-  if (offset == 0) {
-    cursor = 0;
-  } else if (offset != cursor) {
-    LOG_WARN("Cmd 0x72 MdrGetBlock region=%u offset=0x%04X mismatches "
-             "cursor=0x%04X — seeking to requested offset",
-             regionId, offset, cursor);
-    cursor = offset;
-  }
-
-  if (cursor >= view.size()) {
-    LOG_INFO("Cmd 0x72 MdrGetBlock region=%u end-of-stream "
-             "(cursor=0x%04X size=%zu) — cursor reset",
-             regionId, cursor, view.size());
-    cursor = 0;
-    return ipmi::responseSuccess(std::vector<uint8_t>{});
-  }
-
-  size_t sendLen = std::min(view.size() - cursor, kMaxReadChunk*1000);
-  std::vector<uint8_t> chunk(view.begin() + cursor,
-                             view.begin() + cursor + sendLen);
-  uint32_t before = cursor;
-  cursor += static_cast<uint32_t>(sendLen);
-  LOG_INFO("Cmd 0x72 MdrGetBlock region=%u offset=0x%04X → %zu bytes "
-           "(cursor 0x%04X → 0x%04X, view=%zu)",
-           regionId, before, sendLen, before, cursor, view.size());
-  return ipmi::responseSuccess(chunk);
+  LOG_WARN("0x72 unknown region=%u — empty response", regionId);
+  return ipmi::responseSuccess(std::vector<uint8_t>{});
 }
 
 ipmi::RspType<> hMdrWriteBegin(ipmi::Context::ptr, uint8_t regionId,
@@ -391,20 +543,103 @@ ipmi::RspType<> hAmiGetStatus(ipmi::Context::ptr) {
   return ipmi::responseSuccess();
 }
 
-ipmi::RspType<uint8_t> hAmiGetMdrStatus(ipmi::Context::ptr) {
-  LOG_INFO("Cmd 0xA1 GetMdrStatus → 0x00 (buf=%zu slots_queued=%zu)",
-           g_amiBuf.size(), g_amiSlots.size());
-  return ipmi::responseSuccess(uint8_t{0x00});
+// 0xA1 GetMdrStatus — AMI legacy region-status probe sent by the BIOS after
+// each push to verify the BMC accepted the data. The request is one byte
+// (the region ID); the response carries the current size + checksum of that
+// region so the BIOS can compare against what it just pushed.
+//
+// Response layout (matches AMI legacy region-status pattern):
+//     [ regionId:1, valid:1, dataSize:2 LE, checksum:2 LE ] = 6 bytes
+//
+//   region=0 → working SMBIOS payload (g_amiBuf)
+//   region=1 → 4-byte AmiMdrHeader describing the working payload
+ipmi::RspType<std::vector<uint8_t>>
+hAmiGetMdrStatus(ipmi::Context::ptr ctx, std::vector<uint8_t> req) {
+  uint8_t regionId = req.empty() ? 0 : req[0];
+
+  uint16_t dataSize = 0;
+  uint16_t checksum = 0;
+  uint8_t  valid    = 0;
+  if (regionId == kRegionSmbios) {
+    dataSize = static_cast<uint16_t>(g_amiBuf.size());
+    checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+    valid    = g_amiBuf.empty() ? 0 : 1;
+  } else if (regionId == kRegionMeta) {
+    ami::AmiMdrHeader hdr{};
+    hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
+    hdr.checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+    dataSize = sizeof(hdr);
+    uint8_t hdrBytes[sizeof(hdr)];
+    std::memcpy(hdrBytes, &hdr, sizeof(hdr));
+    checksum = ami::computeChecksum(hdrBytes, sizeof(hdrBytes));
+    valid    = 1;
+  } else {
+    LOG_WARN("0xA1 unknown region=%u", regionId);
+  }
+
+  std::vector<uint8_t> rsp{
+      regionId,
+      valid,
+      static_cast<uint8_t>(dataSize & 0xFF),
+      static_cast<uint8_t>((dataSize >> 8) & 0xFF),
+      static_cast<uint8_t>(checksum & 0xFF),
+      static_cast<uint8_t>((checksum >> 8) & 0xFF),
+  };
+
+  LOG_INFO("Cmd 0xA1 GetMdrStatus netfn=0x%02X channel=%u req=[%s] "
+           "→ region=%u valid=%u size=%u chk=0x%04X",
+           ctx ? static_cast<uint8_t>(ctx->netFn) : 0,
+           ctx ? static_cast<uint8_t>(ctx->channel) : 0,
+           hexDump(req, 16).c_str(), regionId, valid, dataSize, checksum);
+  return ipmi::responseSuccess(rsp);
 }
 
+// 0xB2 SetBiosInfo — BIOS pushes a 16-byte buffer that maps to SMBIOS Type 0
+// (BIOS Information) formatted-area fields starting at structure offset +4
+// (the 16 bytes after the standard `[Type, Length, Handle:2]` header):
+//   [Vendor:1, Version:1, StartingAddrSeg:2 LE, ReleaseDate:1, RomSize:1,
+//    Characteristics:8, ExtChar1:1, ExtChar2:1]
+// We find Type 0 in g_amiBuf and overlay these 16 bytes at offset +4, then
+// persist + sync so smbios-mdrv2 picks up the patched fields.
 ipmi::RspType<> hAmiSetBiosInfo(ipmi::Context::ptr,
                                 std::vector<uint8_t> payload) {
-  char hex[3 * 32 + 4] = {0};
-  size_t n = std::min<size_t>(payload.size(), 16);
-  for (size_t i = 0; i < n; ++i) {
-    snprintf(hex + i * 3, 4, "%02X ", payload[i]);
+  LOG_INFO("Cmd 0xB2 SetBiosInfo (%zu bytes): %s", payload.size(),
+           hexDump(payload, 32).c_str());
+
+  if (payload.empty()) {
+    LOG_WARN("0xB2 empty payload — nothing to overlay");
+    return ipmi::responseSuccess();
   }
-  LOG_INFO("Cmd 0xB2 SetBiosInfo (%zu bytes): %s", payload.size(), hex);
+
+  size_t type0Off = findSmbiosStructOffset(g_amiBuf, /*type=*/0);
+  if (type0Off == SIZE_MAX) {
+    LOG_WARN("0xB2 Type 0 BIOS Info struct not found in g_amiBuf — overlay "
+             "skipped (buf=%zu)",
+             g_amiBuf.size());
+    return ipmi::responseSuccess();
+  }
+
+  // Type 0 standard header is [Type:1, Length:1, Handle:2] = 4 bytes.
+  // Overlay begins at the first formatted field (Vendor string index).
+  size_t fieldsOff = type0Off + 4;
+  uint8_t structLen = g_amiBuf[type0Off + 1];
+  size_t maxOverlay = (structLen > 4) ? (structLen - 4) : 0;
+  size_t overlayLen = std::min(payload.size(), maxOverlay);
+
+  if (overlayLen == 0 ||
+      fieldsOff + overlayLen > g_amiBuf.size()) {
+    LOG_WARN("0xB2 overlay would not fit (type0Off=%zu structLen=%u "
+             "maxOverlay=%zu buf=%zu)",
+             type0Off, structLen, maxOverlay, g_amiBuf.size());
+    return ipmi::responseSuccess();
+  }
+
+  std::copy(payload.begin(), payload.begin() + overlayLen,
+            g_amiBuf.begin() + fieldsOff);
+  LOG_INFO("0xB2 overlaid %zu bytes at Type 0 + 4 (offset=%zu, structLen=%u)",
+           overlayLen, fieldsOff, structLen);
+
+  persistWorkingBuffer();
   return ipmi::responseSuccess();
 }
 
@@ -448,11 +683,11 @@ ipmi::RspType<> hAmiSetMdrPos(ipmi::Context::ptr, uint8_t region,
 // g_amiBuf — building up our own picture of what the BIOS wants the final
 // SMBIOS table to contain. Persistence is left for a follow-up once the
 // overlay set is understood; this handler is observation + accumulation only.
-ipmi::RspType<> hAmiSetChunk(ipmi::Context::ptr,
-                             std::vector<uint8_t> raw) {
+ipmi::RspType<uint8_t> hAmiSetChunk(ipmi::Context::ptr,
+                                    std::vector<uint8_t> raw) {
   if (raw.empty()) {
     LOG_WARN("0xB5 empty request body");
-    return ipmi::responseSuccess();
+    return ipmi::responseSuccess(uint8_t{0x00});
   }
   if (raw[0] != 0x00) {
     LOG_WARN("0xB5 reserved byte not 0x00 (got 0x%02X) — layout may differ",
@@ -468,52 +703,41 @@ ipmi::RspType<> hAmiSetChunk(ipmi::Context::ptr,
   }
   std::vector<uint8_t> payload(raw.begin() + startIdx, raw.begin() + endIdx);
 
-  // Dequeue the next (region, offset) slot. If we've run out, fall back to
-  // the last-seen cursor (advancing forward) so the BIOS still gets ACKs.
-  AmiSlot slot;
-  if (!g_amiSlots.empty()) {
-    slot = g_amiSlots.front();
-    g_amiSlots.pop_front();
+  std::string str(payload.begin(), payload.end());
+
+  // BIOS sends the same identifier multiple times in succession — each push
+  // populates one SMBIOS string slot in kAmiSlotTable, cycling through the
+  // table indefinitely.
+  const StringSlot& target =
+      kAmiSlotTable[g_amiCallIndex % kNumAmiSlots];
+
+  LOG_INFO("0xB5 call#%zu → %s (Type %u string #%u) value=\"%s\" len=%zu",
+           g_amiCallIndex, target.label, target.smbiosType,
+           target.stringIndex, asciiSlice(payload, 256).c_str(),
+           payload.size());
+
+  bool changed =
+      replaceSmbiosString(g_amiBuf, target.smbiosType, target.stringIndex,
+                          str);
+  if (changed) {
+    persistWorkingBuffer();
   } else {
-    LOG_WARN("0xB5 with empty slot queue — using last cursor=0x%04X",
-             g_amiCursor);
-    slot = {g_amiRegion, g_amiCursor};
+    LOG_WARN("0xB5 string replacement failed for %s", target.label);
   }
 
-  LOG_INFO("0xB5 string at region=%u offset=0x%04X len=%zu: \"%s\" "
-           "(slots_left=%zu)",
-           slot.region, slot.offset, payload.size(),
-           asciiSlice(payload, 256).c_str(), g_amiSlots.size());
-  LOG_INFO("0xB5     hex: %s", hexDump(payload, 96).c_str());
+  ++g_amiCallIndex;
+  // Keep last-cursor housekeeping so any future code that consults it sees
+  // a sensible value.
+  g_amiRegion = kRegionSmbios;
+  g_amiCursor = static_cast<uint32_t>(payload.size());
 
-  // Overlay only for region 0 (SMBIOS structure table). Region 1 destinations
-  // (the BIOS uses e.g. offset 0x6B9C, well beyond the structure table) are
-  // logged but not applied — they map to a BIOS-side address space we don't
-  // currently mirror.
-  if (slot.region == kRegionSmbios) {
-    size_t end = static_cast<size_t>(slot.offset) + payload.size();
-    if (end <= ami::kMaxPayload) {
-      if (end > g_amiBuf.size()) {
-        g_amiBuf.resize(end, 0);
-      }
-      std::copy(payload.begin(), payload.end(),
-                g_amiBuf.begin() + slot.offset);
-      persistWorkingBuffer();
-    } else {
-      LOG_ERR("0xB5 overlay would exceed buffer cap (offset=0x%04X len=%zu)",
-              slot.offset, payload.size());
-    }
-  } else {
-    LOG_INFO("0xB5 region=%u overlay skipped (only region 0 is mirrored)",
-             slot.region);
-  }
-
-  // Update last-seen cursor in case we underrun later.
-  g_amiRegion = slot.region;
-  g_amiCursor = slot.offset + static_cast<uint32_t>(payload.size());
-
-  // Bare CC=OK. BIOS ignores response body; this is the most permissive ACK.
-  return ipmi::responseSuccess();
+  // AMI BMC convention for 0xB5: respond with 1 byte ack (0x00 = OK). The
+  // BIOS only inspects the EFI_STATUS from SubmitCommand, not the response
+  // body — but a zero-length response body trips the BIOS-side IPMI
+  // transport's `ResponseSize >= 1` check on this BIOS, which returns
+  // EFI_DEVICE_ERROR and triggers a retry storm. One byte of payload keeps
+  // the transport happy.
+  return ipmi::responseSuccess(uint8_t{0x00});
 }
 
 } // namespace
@@ -524,7 +748,7 @@ void setupAmiLegacyHandlers() {
   ami::seedFromBakedIfMissing();
   loadWorkingBuffer();
 
-  for (ipmi::NetFn nf : {ipmi::netFnOemTwo, ipmi::netFnOemSix}) {
+  for (ipmi::NetFn nf : {ipmi::netFnOemSix}) { // ipmi::netFnOemTwo
     ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrAgentStatus,
                           ipmi::Privilege::Admin, hMdrAgentStatus);
     ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetDir,
