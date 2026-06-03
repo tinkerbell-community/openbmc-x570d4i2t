@@ -28,10 +28,14 @@
 #include <ipmid/api.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -228,6 +232,207 @@ void commitAmiBuffer() {
   }
   g_amiBuf.clear();
   g_amiCursor = 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FRU EEPROM → SMBIOS population
+// ────────────────────────────────────────────────────────────────────────────
+
+static const char* kFruEepromPath = "/sys/bus/i2c/devices/7-0057/eeprom";
+
+// Forward declarations (defined later in this file).
+size_t findSmbiosStructOffset(const std::vector<uint8_t>& buf, uint8_t type);
+bool replaceSmbiosString(std::vector<uint8_t>& buf, uint8_t type,
+                         uint8_t stringIndex, const std::string& newStr);
+
+// Advance past one IPMI FRU type/length-prefixed field in `data` at `pos`.
+// Returns the string value (8-bit ASCII fields only; empty for binary/empty).
+// Sets done=true on 0xC1 (End of Fields) or overrun.
+static std::string fruNextField(const std::vector<uint8_t>& data,
+                                size_t& pos, bool& done) {
+    if (pos >= data.size()) { done = true; return {}; }
+    uint8_t tl = data[pos++];
+    if (tl == 0xC1) { done = true; return {}; }
+    uint8_t type = (tl >> 6) & 0x03;
+    uint8_t len  = tl & 0x3F;
+    if (pos + len > data.size()) { done = true; return {}; }
+    std::string s;
+    if (type == 3 && len > 0)   // 8-bit ASCII
+        s.assign(reinterpret_cast<const char*>(data.data() + pos), len);
+    pos += len;
+    return s;
+}
+
+// Read the string index byte for a given field from the SMBIOS formatted area.
+// fieldOffset is the byte offset within the structure (e.g. 4 = Manufacturer).
+static uint8_t smbiosFieldStrIdx(const std::vector<uint8_t>& buf,
+                                 uint8_t type, size_t fieldOffset) {
+    size_t off = findSmbiosStructOffset(buf, type);
+    if (off == SIZE_MAX || off + fieldOffset >= buf.size()) return 0;
+    return buf[off + fieldOffset];
+}
+
+// Read /sys/.../eeprom, parse IPMI FRU board and product areas, overlay the
+// board serial number, system UUID, manufacturer and product strings into
+// g_amiBuf (SMBIOS Types 1 and 2), then persist.
+void populateSmbiosFromFru() {
+    std::ifstream f(kFruEepromPath, std::ios::binary);
+    if (!f) {
+        LOG_WARN("FRU: cannot open %s", kFruEepromPath);
+        return;
+    }
+    std::vector<uint8_t> fru(std::istreambuf_iterator<char>(f), {});
+    if (fru.size() < 8 || fru[0] != 0x01) {
+        LOG_WARN("FRU: invalid header (size=%zu, ver=0x%02x)",
+                 fru.size(), fru.empty() ? 0 : fru[0]);
+        return;
+    }
+
+    // ── Board Area ──────────────────────────────────────────────────────────
+    std::string boardMfr, boardProduct, boardSerial;
+    size_t boardOff = static_cast<size_t>(fru[3]) * 8;
+    if (boardOff + 6 < fru.size() && fru[boardOff] == 0x01) {
+        size_t pos = boardOff + 6;   // skip version(1) len(1) lang(1) mfgdate(3)
+        bool done = false;
+        boardMfr     = fruNextField(fru, pos, done);
+        boardProduct = fruNextField(fru, pos, done);
+        boardSerial  = fruNextField(fru, pos, done);
+    }
+
+    // ── Product Area ────────────────────────────────────────────────────────
+    std::string productSerial;
+    std::array<uint8_t, 16> uuid{};
+    bool haveUuid = false;
+    size_t productOff = static_cast<size_t>(fru[4]) * 8;
+    if (productOff + 3 < fru.size() && fru[productOff] == 0x01) {
+        size_t areaLen = static_cast<size_t>(fru[productOff + 1]) * 8;
+        size_t areaEnd = std::min(productOff + areaLen, fru.size());
+        size_t pos = productOff + 3;   // skip version(1) len(1) lang(1)
+        bool done = false;
+        fruNextField(fru, pos, done);              // 1. manufacturer
+        fruNextField(fru, pos, done);              // 2. product name
+        fruNextField(fru, pos, done);              // 3. part/model
+        fruNextField(fru, pos, done);              // 4. version
+        productSerial = fruNextField(fru, pos, done); // 5. serial
+        fruNextField(fru, pos, done);              // 6. asset tag
+        fruNextField(fru, pos, done);              // 7. fru file id
+        // Custom fields: look for a 32-char hex UUID
+        while (!done && pos < areaEnd) {
+            std::string extra = fruNextField(fru, pos, done);
+            if (extra.size() == 32) {
+                bool ok = true;
+                for (size_t i = 0; i < 32 && ok; i++)
+                    if (!isxdigit(static_cast<unsigned char>(extra[i]))) ok = false;
+                if (ok) {
+                    for (int i = 0; i < 16; i++) {
+                        char h[3] = {extra[i * 2], extra[i * 2 + 1], '\0'};
+                        uuid[i] = static_cast<uint8_t>(strtoul(h, nullptr, 16));
+                    }
+                    haveUuid = true;
+                    LOG_INFO("FRU: UUID %s", extra.c_str());
+                }
+            }
+        }
+    }
+
+    LOG_INFO("FRU: boardMfr='%s' product='%s' boardSerial='%s' productSerial='%s'",
+             boardMfr.c_str(), boardProduct.c_str(),
+             boardSerial.c_str(), productSerial.c_str());
+
+    if (g_amiBuf.empty()) {
+        LOG_WARN("FRU: g_amiBuf empty — skipping overlay");
+        return;
+    }
+
+    bool changed = false;
+    const std::string& serial = productSerial.empty() ? boardSerial : productSerial;
+
+    // Type 2 (Baseboard): Manufacturer, Product, Serial Number
+    if (!boardMfr.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 4);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardMfr)) changed = true;
+    }
+    if (!boardProduct.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 5);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardProduct)) changed = true;
+    }
+    if (!boardSerial.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 7);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardSerial)) changed = true;
+    }
+
+    // Type 1 (System): Manufacturer, Product, Serial Number
+    if (!boardMfr.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 4);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, boardMfr)) changed = true;
+    }
+    if (!boardProduct.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 5);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, boardProduct)) changed = true;
+    }
+    if (!serial.empty()) {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 7);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, serial)) changed = true;
+    }
+
+    // Type 1 UUID: 16 bytes at offset 8 within the formatted area
+    if (haveUuid) {
+        size_t off = findSmbiosStructOffset(g_amiBuf, 1);
+        uint8_t slen = (off != SIZE_MAX) ? g_amiBuf[off + 1] : 0;
+        if (off != SIZE_MAX && slen >= 24 && off + 24 <= g_amiBuf.size()) {
+            std::memcpy(g_amiBuf.data() + off + 8, uuid.data(), 16);
+            changed = true;
+            LOG_INFO("FRU: wrote UUID to Type 1 offset 8");
+        }
+    }
+
+    // ── Type 3 (System Enclosure / Chassis) ──────────────────────────────────
+    // Chassis Type byte at struct offset 5: 0x11 = Rack Mount.
+    // Manufacturer and Serial populated from FRU board area.
+    {
+        size_t t3off = findSmbiosStructOffset(g_amiBuf, 3);
+        if (t3off != SIZE_MAX && t3off + 5 < g_amiBuf.size()) {
+            if (g_amiBuf[t3off + 5] != 0x11) {
+                g_amiBuf[t3off + 5] = 0x11;
+                changed = true;
+                LOG_INFO("FRU: Type 3 chassis type → 0x11 (Rack Mount)");
+            }
+        }
+        uint8_t t3mfr = smbiosFieldStrIdx(g_amiBuf, 3, 4);
+        if (t3mfr && replaceSmbiosString(g_amiBuf, 3, t3mfr, "ASRockRack"))
+            changed = true;
+        if (!boardSerial.empty()) {
+            uint8_t t3ser = smbiosFieldStrIdx(g_amiBuf, 3, 7);
+            if (t3ser && replaceSmbiosString(g_amiBuf, 3, t3ser, boardSerial))
+                changed = true;
+        }
+    }
+
+    // ── Type 4 (Processor) ────────────────────────────────────────────────────
+    // Baseline smbios.dmp was generated on an Intel machine; fix manufacturer,
+    // version string, and Processor Family byte (0x18 = AMD).
+    {
+        size_t t4off = findSmbiosStructOffset(g_amiBuf, 4);
+        if (t4off != SIZE_MAX && t4off + 6 < g_amiBuf.size()) {
+            if (g_amiBuf[t4off + 6] != 0x18) {
+                g_amiBuf[t4off + 6] = 0x18;   // AMD family
+                changed = true;
+            }
+        }
+        uint8_t t4mfr = smbiosFieldStrIdx(g_amiBuf, 4, 7);
+        if (t4mfr && replaceSmbiosString(g_amiBuf, 4, t4mfr,
+                "Advanced Micro Devices, Inc.")) changed = true;
+        uint8_t t4ver = smbiosFieldStrIdx(g_amiBuf, 4, 0x10);
+        if (t4ver && replaceSmbiosString(g_amiBuf, 4, t4ver,
+                "AMD Processor")) changed = true;
+    }
+
+    if (changed) {
+        persistWorkingBuffer();
+        LOG_INFO("FRU: SMBIOS updated from FRU EEPROM");
+    } else {
+        LOG_WARN("FRU: no SMBIOS fields changed (strings may already match)");
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -494,7 +699,7 @@ hMdrGetBlock(ipmi::Context::ptr ctx, uint8_t regionId,
   }
 
   LOG_WARN("0x72 unknown region=%u — empty response", regionId);
-  return ipmi::responseSuccess(std::vector<uint8_t>{});
+  return ipmi::responseSuccess();
 }
 
 ipmi::RspType<> hMdrWriteBegin(ipmi::Context::ptr, uint8_t regionId,
@@ -719,25 +924,29 @@ ipmi::RspType<uint8_t> hAmiSetChunk(ipmi::Context::ptr,
   bool changed =
       replaceSmbiosString(g_amiBuf, target.smbiosType, target.stringIndex,
                           str);
-  if (changed) {
-    persistWorkingBuffer();
-  } else {
-    LOG_WARN("0xB5 string replacement failed for %s", target.label);
+  if (!changed) {
+    LOG_WARN("0xB5 string replacement failed for %s — returning 0x00, "
+             "call index NOT advanced (will retry same slot)",
+             target.label);
+    // Return 0x00 without advancing g_amiCallIndex so the BIOS retries and
+    // the same slot is targeted on the next 0xB5 call.
+    return ipmi::responseSuccess(uint8_t{0x00});
   }
 
+  persistWorkingBuffer();
   ++g_amiCallIndex;
   // Keep last-cursor housekeeping so any future code that consults it sees
   // a sensible value.
   g_amiRegion = kRegionSmbios;
   g_amiCursor = static_cast<uint32_t>(payload.size());
 
-  // AMI BMC convention for 0xB5: respond with 1 byte ack (0x00 = OK). The
+  // AMI BMC convention for 0xB5: respond with 1 byte ack (0x01 = OK). The
   // BIOS only inspects the EFI_STATUS from SubmitCommand, not the response
   // body — but a zero-length response body trips the BIOS-side IPMI
   // transport's `ResponseSize >= 1` check on this BIOS, which returns
   // EFI_DEVICE_ERROR and triggers a retry storm. One byte of payload keeps
   // the transport happy.
-  return ipmi::responseSuccess(uint8_t{0x00});
+  return ipmi::responseSuccess(uint8_t{0x01});
 }
 
 } // namespace
@@ -747,6 +956,7 @@ void setupAmiLegacyHandlers() {
   LOG_INFO("registering AMI legacy + MDR V2 handlers on NetFn 0x3A/0x32");
   ami::seedFromBakedIfMissing();
   loadWorkingBuffer();
+  populateSmbiosFromFru();
 
   for (ipmi::NetFn nf : {ipmi::netFnOemSix}) { // ipmi::netFnOemTwo
     ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrAgentStatus,
