@@ -4,3 +4,18 @@ PACKAGECONFIG:remove = "cpuinfo cpuinfo-peci"
 
 # Enable the IPMI blob handler so smbios tables can be pushed via blob interface.
 PACKAGECONFIG:append = " smbios-ipmi-blob"
+
+# Install the DIMM socket/channel location table for this board.
+# Keys are SMBIOS Type 17 Device Locator strings as reported by the ASRock
+# BIOS (CPU1_DIMM_A1 / CPU1_DIMM_B1); values map each slot to its
+# Socket / MemoryController / Channel / Slot index for Redfish/IPMI DIMM info.
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI:append = " file://memoryLocationTable.json"
+
+do_install:append() {
+    install -d ${D}${datadir}/smbios-mdr
+    install -m 0644 ${UNPACKDIR}/memoryLocationTable.json \
+        ${D}${datadir}/smbios-mdr/memoryLocationTable.json
+}
+
+FILES:${PN}:append = " ${datadir}/smbios-mdr/memoryLocationTable.json"

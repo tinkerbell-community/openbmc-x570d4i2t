@@ -28,6 +28,4 @@ RDEPENDS:${PN}-system = " \
         phosphor-pid-control \
         nct6779-bridge \
         smbios-mdr \
-        ami-ipmi-oem \
-        host-smbios-push \
         "

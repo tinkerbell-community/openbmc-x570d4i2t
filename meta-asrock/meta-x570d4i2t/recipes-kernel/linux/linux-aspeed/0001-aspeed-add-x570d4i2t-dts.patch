@@ -29,8 +29,8 @@ phosphor-led-manager led-group-config.json to target them by name.
 Signed-off-by: ASRock OpenBMC port <noreply@example.com>
 ---
  arch/arm/boot/dts/aspeed/Makefile                  |   1 +
- .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 364 ++++++++++++++++++
- 2 files changed, 365 insertions(+)
+ .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 334 ++++++++++++++++++
+ 2 files changed, 335 insertions(+)
  create mode 100644 arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
 
 diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
@@ -48,7 +48,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,437 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -81,6 +81,12 @@ new file mode 100644
 +		pci_memory: region@9a000000 {
 +			no-map;
 +			reg = <0x9a000000 0x00010000>; /* 64K */
++		};
++
++		xdma_memory: region@9ff00000 {
++			no-map;
++			compatible = "shared-dma-pool";
++			reg = <0x9ff00000 0x00100000>; /* 1MB DMA buffer for aspeed-xdma */
 +		};
 +
 +		video_engine_memory: jpegbuffer {
@@ -474,5 +480,10 @@ new file mode 100644
 +			&pinctrl_adc11_default   /* 5V */
 +			&pinctrl_adc12_default>; /* 12V */
 +};
--- 
++
++&xdma {
++	status = "okay";
++	memory-region = <&xdma_memory>;
++};
+--
 2.40.0
