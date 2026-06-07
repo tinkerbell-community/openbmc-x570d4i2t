@@ -51,6 +51,7 @@ RDEPENDS:${PN}-system = " \
         phosphor-software-manager \
         phosphor-virtual-sensor \
         x570d4i2t-vga-enable \
+        smbios-mdr \
         asrock-ipmi-oem \
         dbus-sensors \
         "
