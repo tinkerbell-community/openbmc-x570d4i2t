@@ -268,6 +268,13 @@ ipmi::RspType<uint16_t>
     std::string severity = selSeverity(sensorType, assertion);
     uint16_t newRecordId = 0xFFFF; // no-persistence placeholder
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AddSELEntry",
+        phosphor::logging::entry("SENSOR_TYPE=0x%02X", sensorType),
+        phosphor::logging::entry("SENSOR_NUM=0x%02X", sensorNum),
+        phosphor::logging::entry("EVENT_TYPE=0x%02X", eventType),
+        phosphor::logging::entry("DIR=%s", assertion ? "assert" : "deassert"));
+
     try
     {
         auto dbus = getSdBus();
@@ -481,6 +488,9 @@ ipmi::RspType<uint8_t>
         return ipmi::responseInvalidFieldRequest();
 
     // Collect all entry paths and delete each one
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "ClearSEL: erasing all log entries");
+    uint32_t deletedCount = 0;
     try
     {
         auto dbus = getSdBus();
@@ -519,6 +529,7 @@ ipmi::RspType<uint8_t>
                 dbus->call_noreply(delMsg);
             }
             catch (...) {}
+            ++deletedCount;
         }
     }
     catch (const std::exception& e)
@@ -529,6 +540,9 @@ ipmi::RspType<uint8_t>
         return ipmi::responseUnspecifiedError();
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "ClearSEL: complete",
+        phosphor::logging::entry("DELETED=%u", deletedCount));
     return ipmi::responseSuccess(static_cast<uint8_t>(0xFF));
 }
 

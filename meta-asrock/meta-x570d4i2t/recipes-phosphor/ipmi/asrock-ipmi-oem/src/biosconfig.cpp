@@ -245,6 +245,9 @@ ipmi::RspType<> ipmiSetBIOSCap(ipmi::Context::ptr& /*ctx*/,
     gNVOOBdata.mBIOSCapabilities.OOBCapability = biosCap;
     gNVOOBdata.mIsBIOSCapInitDone              = true;
     flushNVOOBdata();
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "BIOS OOB: SetBIOSCap",
+        phosphor::logging::entry("CAP=0x%02X", biosCap));
     return ipmi::responseSuccess();
 }
 
@@ -324,6 +327,10 @@ ipmi::RspType<uint32_t> ipmiSetPayload(ipmi::Context::ptr& ctx,
                 static_cast<uint8_t>(PStatus::Unknown);
             pi.payloadType = payloadType;
 
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "BIOS OOB: payload transfer started",
+                phosphor::logging::entry("TYPE=%u", payloadType),
+                phosphor::logging::entry("TOTAL_SIZE=%u", pi.payloadTotalSize));
             return ipmi::responseSuccess(pi.payloadReservationID);
         }
 
@@ -373,6 +380,13 @@ ipmi::RspType<uint32_t> ipmiSetPayload(ipmi::Context::ptr& ctx,
             pi.payloadStatus = static_cast<uint8_t>(PStatus::Unknown);
             pi.actualTotalPayloadWritten += hdr->payloadCurrentSize;
 
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "BIOS OOB: payload chunk received",
+                phosphor::logging::entry("TYPE=%u", payloadType),
+                phosphor::logging::entry("OFFSET=%u", hdr->payloadOffset),
+                phosphor::logging::entry("SIZE=%u", hdr->payloadCurrentSize),
+                phosphor::logging::entry("TOTAL_WRITTEN=%u",
+                                          pi.actualTotalPayloadWritten));
             return ipmi::responseSuccess(hdr->payloadCurrentSize);
         }
 
@@ -449,6 +463,11 @@ ipmi::RspType<uint32_t> ipmiSetPayload(ipmi::Context::ptr& ctx,
             }
 
             flushNVOOBdata();
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "BIOS OOB: payload transfer complete",
+                phosphor::logging::entry("TYPE=%u", payloadType),
+                phosphor::logging::entry("BYTES=%u",
+                                          pi.actualTotalPayloadWritten));
             return ipmi::responseSuccess(pi.actualTotalPayloadWritten);
         }
 
@@ -478,6 +497,9 @@ ipmi::RspType<uint32_t> ipmiSetPayload(ipmi::Context::ptr& ctx,
                                    std::to_string(payloadType);
             ::unlink(tempPath.c_str());
             flushNVOOBdata();
+            phosphor::logging::log<phosphor::logging::level::WARNING>(
+                "BIOS OOB: payload transfer aborted",
+                phosphor::logging::entry("TYPE=%u", payloadType));
             return ipmi::responseSuccess(0u);
         }
 

@@ -43,6 +43,9 @@
 
 #include <array>
 #include <cstdint>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -129,6 +132,10 @@ ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t, uint8_t>
     uint8_t dataRequest = (dirEntries == 0) ? dirDataRequested
                                             : dirDataNotRequested;
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [1/9] AgentStatus",
+        phosphor::logging::entry("DIR_ENTRIES=%u", dirEntries),
+        phosphor::logging::entry("DATA_REQUESTED=%u", dataRequest));
     return ipmi::responseSuccess(mdr2Version, smbiosAgentVersion,
                                  static_cast<uint8_t>(0), dirEntries,
                                  dataRequest);
@@ -174,6 +181,10 @@ ipmi::RspType<std::vector<uint8_t>>
     {
         return ipmi::responseResponseError();
     }
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "MDR2 [2/9] GetDir",
+        phosphor::logging::entry("DIR_INDEX=%u", dirIndex),
+        phosphor::logging::entry("RESPONSE_BYTES=%zu", dataOut.size()));
     return ipmi::responseSuccess(dataOut);
 }
 
@@ -265,6 +276,9 @@ ipmi::RspType<std::vector<uint8_t>>
         return ipmi::responseResponseError();
     }
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "MDR2 [3/9] GetDataInfo",
+        phosphor::logging::entry("ID_INDEX=%d", idIndex));
     return ipmi::responseSuccess(res);
 }
 
@@ -307,6 +321,8 @@ ipmi::RspType<std::vector<uint8_t>>
     {
         return ipmi::responseUnspecifiedError();
     }
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "MDR2 [4/9] DataInfoOffer: slot offered");
     return ipmi::responseSuccess(dataOut);
 }
 
@@ -355,6 +371,11 @@ ipmi::RspType<bool>
         return ipmi::responseResponseError();
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [5/9] SendDir",
+        phosphor::logging::entry("DIR_VERSION=%u", dirVersion),
+        phosphor::logging::entry("ENTRIES=%u", returnedEntries),
+        phosphor::logging::entry("TERMINATE=%d", static_cast<int>(terminate)));
     return ipmi::responseSuccess(terminate);
 }
 
@@ -421,6 +442,12 @@ ipmi::RspType<bool>
         return ipmi::responseResponseError();
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [6/9] SendDataInfo",
+        phosphor::logging::entry("DATA_LENGTH=%u", dataLength),
+        phosphor::logging::entry("DATA_VERSION=%u", dataVersion),
+        phosphor::logging::entry("ENTRY_CHANGED=%d",
+                                  static_cast<int>(entryChanged)));
     return ipmi::responseSuccess(entryChanged);
 }
 
@@ -506,6 +533,10 @@ ipmi::RspType<uint8_t, uint16_t, uint32_t, uint32_t, uint32_t>
 
     // xferAddress and xferLength of 0 signal that the BIOS must use the
     // SendDataBlock IPMI path rather than direct memory writes.
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [7/9] LockData",
+        phosphor::logging::entry("SESSION=%u", session),
+        phosphor::logging::entry("DATA_SET_SIZE=%u", commonData[0]));
     return ipmi::responseSuccess(mdr2Version, session,
                                  commonData[0], // dataSetSize
                                  static_cast<uint32_t>(0), // xferAddress
@@ -528,6 +559,8 @@ ipmi::RspType<>
     }
     // Lock state is managed by smbios-mdr; no explicit unlock call
     // needed on the D-Bus side for the IPMI path.
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "MDR2 [8/9] UnlockData: lock released");
     return ipmi::responseSuccess();
 }
 
@@ -606,6 +639,10 @@ ipmi::RspType<uint8_t, uint16_t>
     }
 
     static constexpr uint8_t xferStartAck = 1;
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [9/9-prep] DataStart",
+        phosphor::logging::entry("DATA_LENGTH=%u", dataLength),
+        phosphor::logging::entry("SESSION=%u", session));
     return ipmi::responseSuccess(xferStartAck, session);
 }
 
@@ -621,6 +658,79 @@ ipmi::RspType<uint8_t, uint16_t>
 //           data[xferLength]
 // Response: (none beyond CC)
 // -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// Persistent SMBIOS file — written by cmd_mdr2_data_done so that
+// smbiosmdrv2app can parse the table when AgentSynchronizeData() fires.
+//
+// Layout matches phosphor-smbios-mdr MDRSMBIOSHeader (packed, 9 bytes):
+//   dirVer    = mdrDirVersion = 1
+//   mdrType   = mdrTypeII     = 2
+//   timestamp = seconds-since-epoch at time of transfer
+//   dataSize  = raw SMBIOS table byte count
+// followed immediately by the raw SMBIOS binary.
+// -----------------------------------------------------------------------
+
+static constexpr uint8_t     smbiosDirVer   = 1;
+static constexpr uint8_t     smbiosMdrType  = 2;
+static constexpr const char* smbiosDataFile = "/var/lib/smbios/smbios2";
+
+#pragma pack(push, 1)
+struct SmbiosMdrFileHeader
+{
+    uint8_t  dirVer;
+    uint8_t  mdrType;
+    uint32_t timestamp;
+    uint32_t dataSize;
+};
+#pragma pack(pop)
+
+static bool writeSmbiosFile(const std::vector<uint8_t>& blob)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(
+        std::filesystem::path(smbiosDataFile).parent_path(), ec);
+    if (ec)
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "writeSmbiosFile: mkdir failed",
+            phosphor::logging::entry("ERROR=%s", ec.message().c_str()));
+        return false;
+    }
+
+    SmbiosMdrFileHeader hdr{};
+    hdr.dirVer    = smbiosDirVer;
+    hdr.mdrType   = smbiosMdrType;
+    hdr.timestamp = static_cast<uint32_t>(std::time(nullptr));
+    hdr.dataSize  = static_cast<uint32_t>(blob.size());
+
+    std::ofstream out(smbiosDataFile,
+                      std::ios_base::binary | std::ios_base::trunc);
+    if (!out.is_open())
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "writeSmbiosFile: cannot open file for writing",
+            phosphor::logging::entry("PATH=%s", smbiosDataFile));
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(&hdr),
+              static_cast<std::streamsize>(sizeof(hdr)));
+    out.write(reinterpret_cast<const char*>(blob.data()),
+              static_cast<std::streamsize>(blob.size()));
+    out.close();
+    if (out.fail())
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "writeSmbiosFile: write failed",
+            phosphor::logging::entry("PATH=%s", smbiosDataFile));
+        return false;
+    }
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "writeSmbiosFile: SMBIOS table written",
+        phosphor::logging::entry("PATH=%s", smbiosDataFile),
+        phosphor::logging::entry("BYTES=%zu", blob.size()));
+    return true;
+}
 
 // Per-session accumulation buffer (indexed by session handle).
 // Only one active session is expected at a time.
@@ -662,7 +772,15 @@ ipmi::RspType<>
     {
         g_sessionBuffer.clear();
         g_activeSession = lockHandle;
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "MDR2 SendDataBlock: new transfer session",
+            phosphor::logging::entry("SESSION=%u", lockHandle));
     }
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "MDR2 SendDataBlock",
+        phosphor::logging::entry("SESSION=%u", lockHandle),
+        phosphor::logging::entry("OFFSET=%u", xferOffset),
+        phosphor::logging::entry("LENGTH=%u", xferLength));
     size_t needed = xferOffset + xferLength;
     if (g_sessionBuffer.size() < needed)
     {
@@ -740,17 +858,20 @@ ipmi::RspType<>
     std::string service = getMdrv2Service();
     auto dbus = getSdBus();
 
-    // Write the accumulated SMBIOS data to flash via the D-Bus service.
-    // smbios-mdr expects the data to already be in its internal storage
-    // (put there by SharedMemoryArea in the reference implementation).
-    // On the IPMI-only path we call AgentSynchronizeData directly after
-    // the buffer has been assembled via SendDataBlock.
-    //
-    // Note: a production implementation should write the data to
-    // /var/lib/smbios/smbios2 matching the MDRSMBIOSHeader format that
-    // smbiosmdrv2app parses in agentSynchronizeData().  For now we call
-    // AgentSynchronizeData and let the daemon re-read from flash if it
-    // already has data there from a prior transfer.
+    // Write the accumulated buffer to /var/lib/smbios/smbios2 with the
+    // MDRSMBIOSHeader prefix so that smbiosmdrv2app can parse it when
+    // AgentSynchronizeData() fires (mirrors smbiosPushWriteFile in the
+    // Redfish host-interface handler, ported here to the IPMI path per
+    // the intel-ipmi-oem ipmi_to_redfish_hooks.cpp side-effect pattern).
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR2 [9/9] DataDone: flushing buffer",
+        phosphor::logging::entry("SESSION=%u", lockHandle),
+        phosphor::logging::entry("BYTES=%zu", g_sessionBuffer.size()));
+    if (!writeSmbiosFile(g_sessionBuffer))
+    {
+        return ipmi::responseResponseError();
+    }
+
     bool status = false;
     {
         sdbusplus::message_t method = dbus->new_method_call(

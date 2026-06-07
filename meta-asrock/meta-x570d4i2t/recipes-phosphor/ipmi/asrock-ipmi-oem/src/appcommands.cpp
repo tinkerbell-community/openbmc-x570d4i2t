@@ -221,6 +221,10 @@ ipmi::RspType<uint8_t,  // deviceId
         parseFwVersion(ver, fwMajor, fwMinorBcd);
     }
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "GetDeviceId",
+        phosphor::logging::entry("FW_MAJOR=%u", fwMajor),
+        phosphor::logging::entry("FW_MINOR_BCD=0x%02X", fwMinorBcd));
     return ipmi::responseSuccess(
         deviceId, deviceRevision,
         fwMajor, fwMinorBcd, ipmiVersion, additionalSupport,
@@ -281,6 +285,9 @@ ipmi::RspType<std::array<uint8_t, 16>>
         }
     }
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "GetSystemGuid",
+        phosphor::logging::entry("UUID=%s", uuidStr.c_str()));
     return ipmi::responseSuccess(uuid);
 }
 

@@ -552,6 +552,9 @@ ipmi::RspType<> ipmiManageBmcConfig(ipmi::Context::ptr& /*ctx*/,
         return ipmi::responseInvalidFieldRequest();
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "ipmiManageBmcConfig: BMC reset requested",
+        phosphor::logging::entry("ACTION=0x%02X", action));
     try
     {
         auto dbus = getSdBus();

@@ -172,6 +172,13 @@ ipmi::RspType<>
     std::string message   = eventMessage(sensorType, sensorNum,
                                           eventType, eventData1);
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "PlatformEvent",
+        phosphor::logging::entry("SENSOR_TYPE=0x%02X", sensorType),
+        phosphor::logging::entry("SENSOR_NUM=0x%02X", sensorNum),
+        phosphor::logging::entry("EVENT_TYPE=0x%02X", eventType),
+        phosphor::logging::entry("DIR=%s", assertion ? "assert" : "deassert"));
+
     try
     {
         auto dbus = getSdBus();
