@@ -14,6 +14,8 @@ Mappings applied:
   theme-color-light('X') → var(--bs-X-bg-subtle)
   theme-color-dark('light') → var(--bs-tertiary-bg)
 
+Upstream-Status: Inappropriate [X570D4I-2T board-specific webui-vue theming]
+
 ---
  src/assets/styles/bmc/custom/_alert.scss    | 24 ++++++------
  src/assets/styles/bmc/custom/_badge.scss    |  8 ++--

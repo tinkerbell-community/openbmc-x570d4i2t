@@ -7,6 +7,8 @@ Set $color-mode-type to media-query so Bootstrap uses
 @media (prefers-color-scheme: dark) instead of [data-bs-theme=dark]
 attribute selectors for dark mode.
 
+Upstream-Status: Inappropriate [X570D4I-2T board-specific webui-vue theming]
+
 ---
  src/assets/styles/bootstrap/_index.scss | 3 +++
  1 file changed, 3 insertions(+)

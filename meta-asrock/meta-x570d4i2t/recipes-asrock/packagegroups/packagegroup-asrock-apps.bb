@@ -27,5 +27,7 @@ RDEPENDS:${PN}-system = " \
         phosphor-power-regulators \
         phosphor-pid-control \
         nct6779-bridge \
+        x570d4i2t-vga-enable \
         smbios-mdr \
+        phosphor-ipmi-blobs \
         "
