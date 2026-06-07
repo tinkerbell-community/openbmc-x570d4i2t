@@ -5,13 +5,18 @@ X570D4I-2T BMC running OpenBMC, using the same IPMI provider \
 plugin architecture as phosphor-host-ipmid.  \
 \
 Provides: \
+  - App NetFn overrides: GetDeviceId (real FW version from D-Bus), GetSystemGuid \
+  - Chassis NetFn overrides: GetChassisStatus (with SIO intrusion state + \
+    identify LED), ChassisIdentify (LED group), GetSystemRestartCause \
+  - Sensor NetFn override: PlatformEvent (routes to phosphor-logging / Redfish) \
+  - Storage NetFn overrides: GetSELInfo, AddSELEntry (Redfish bridge), GetSELTime \
   - BIOS OOB configuration protocol (SetBIOSCap / GetBIOSCap, \
-    SetPayload / GetPayload) mirroring the interface implemented by \
-    intel-ipmi-oem so that host UEFI firmware built with the standard \
-    phosphor OOB BIOS-config protocol works unmodified.  Received \
-    BIOS setup data is stored in /var/oob/ and published on the \
-    xyz.openbmc_project.BIOSConfig.Manager D-Bus interface. \
-  - GetBoardInfo OEM command (board product name via inventory D-Bus). \
+    SetPayload / GetPayload) — received BIOS XML stored in /var/oob/ and \
+    published on xyz.openbmc_project.BIOSConfig.Manager \
+  - AMI/ASRock OEM commands (NetFn 0x30): GetBoardInfo, GetSensorInfo, \
+    GetFwVersion, MuxSwitching (GPIOJ1), PeciReadWrite stub, PsuInfo, \
+    ManageBmcConfig, GetSelPolicy, YAFU stubs (phosphor-ipmi-blobs path) \
+  - MDR2 SMBIOS transfer protocol (NetFn 0x3E, 12 handlers) \
 "
 
 LICENSE = "Apache-2.0"
@@ -22,9 +27,13 @@ SRC_URI = " \
     file://meson.options \
     file://include/biosconfig.hpp \
     file://include/oemcommands.hpp \
+    file://src/appcommands.cpp \
     file://src/biosconfig.cpp \
+    file://src/chassiscommands.cpp \
     file://src/oemcommands.cpp \
+    file://src/sensorcommands.cpp \
     file://src/smbiosmdrv2handler.cpp \
+    file://src/storagecommands.cpp \
     "
 
 S = "${UNPACKDIR}"

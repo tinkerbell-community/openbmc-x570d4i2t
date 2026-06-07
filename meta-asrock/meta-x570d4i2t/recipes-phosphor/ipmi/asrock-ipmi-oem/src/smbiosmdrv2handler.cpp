@@ -798,73 +798,73 @@ static void registerMDR2Functions()
 
     // <AgentStatus>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIAgentStatus),
         ipmi::Privilege::Operator, mdr2AgentStatus);
 
     // <GetDir>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDir),
         ipmi::Privilege::Operator, mdr2GetDir);
 
     // <GetDataInfo>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDataInfo),
         ipmi::Privilege::Operator, mdr2GetDataInfo);
 
     // <LockData>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIILockData),
         ipmi::Privilege::Operator, mdr2LockData);
 
     // <UnlockData>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIUnlockData),
         ipmi::Privilege::Operator, mdr2UnlockData);
 
     // <GetDataBlock>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDataBlock),
         ipmi::Privilege::Operator, mdr2GetDataBlock);
 
     // <SendDir>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDir),
         ipmi::Privilege::Operator, mdr2SendDir);
 
     // <SendDataInfoOffer>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataInfoOffer),
         ipmi::Privilege::Operator, mdr2DataInfoOffer);
 
     // <SendDataInfo>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataInfo),
         ipmi::Privilege::Operator, mdr2SendDataInfo);
 
     // <DataStart>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIDataStart),
         ipmi::Privilege::Operator, cmd_mdr2_data_start);
 
     // <DataDone>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIIDataDone),
         ipmi::Privilege::Operator, cmd_mdr2_data_done);
 
     // <SendDataBlock>
     ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(netFnMdr),
+        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
         static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataBlock),
         ipmi::Privilege::Operator, mdr2SendDataBlock);
 }

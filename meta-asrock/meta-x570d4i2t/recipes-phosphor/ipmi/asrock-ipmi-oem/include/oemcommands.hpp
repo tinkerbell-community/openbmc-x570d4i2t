@@ -37,12 +37,6 @@ namespace asrock
 // KVM mux, PECI, PSU, firmware version, and board identity.
 static constexpr uint8_t netFnGeneral = 0x30;
 
-// NetFn 0x3E — OEM Eight (NETFN_TEST_OEM in Megarac)
-// Used for MDR2 SMBIOS transfer commands, matching the convention from
-// intel-ipmi-oem so that BIOS firmware built against the phosphor MDR2
-// protocol works without modification.
-static constexpr uint8_t netFnMdr = 0x3E;
-
 // -----------------------------------------------------------------------
 // NETFN_AMI (0x30) command codes
 // -----------------------------------------------------------------------
