@@ -25,7 +25,6 @@ RDEPENDS:${PN}-fans = " \
 
 SUMMARY:${PN}-flash = "ASRock Flash"
 RDEPENDS:${PN}-flash = " \
-        phosphor-ipmi-blobs \
         phosphor-ipmi-flash \
         "
 
@@ -37,5 +36,6 @@ RDEPENDS:${PN}-system = " \
         phosphor-software-manager \
         phosphor-virtual-sensor \
         x570d4i2t-vga-enable \
-        smbios-mdr \
+        asrock-ipmi-oem \
+        biosconfig-manager \
         "

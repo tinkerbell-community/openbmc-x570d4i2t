@@ -142,7 +142,7 @@ new file mode 100644
 +	/*  H */ "", "", "", "", "input-mfg-mode-n", "",
 +		 "led-heartbeat-n", "input-case-open-n",
 +	/*  I */ "", "", "", "", "", "", "", "",
-+	/*  J */ "output-bmc-ready-n", "", "", "", "", "", "", "",
++	/*  J */ "output-bmc-ready-n", "control-bios-spi-mux-n", "", "", "", "", "", "",
 +	/*  K */ "", "", "", "", "", "", "", "",
 +	/*  L */ "", "", "", "", "", "", "", "",
 +	/*  M */ "", "", "", "", "", "", "", "",
@@ -185,7 +185,7 @@ new file mode 100644
 +	pinctrl-0 = <&pinctrl_spi1_default>;
 +	flash@0 {
 +		status = "okay";
-+		label = "pnor";
++		label = "bios";
 +		m25p,fast-read;
 +		spi-max-frequency = <50000000>;
 +	};
