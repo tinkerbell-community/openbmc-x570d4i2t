@@ -10,7 +10,7 @@
 //
 // Implemented handlers (all on NetFn 0x30 / NETFN_AMI):
 //
-//   cmdGetBoardInfo  (0x50) — board product name from D-Bus FRU inventory
+//   cmdGetInventory  (0xE6) — board/system inventory from D-Bus FRU + Software objects
 //   cmdGetSensorInfo (0x1E) — sensor name/type list from D-Bus dbus-sensors
 //   cmdGetFwVersion  (0x20) — BMC firmware version from D-Bus Software objects
 //   cmdGetFwProtocol (0x21) — static protocol version echo
@@ -34,6 +34,7 @@
 #include <sdbusplus/bus.hpp>
 
 #include <array>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -107,45 +108,106 @@ static std::string getService(const std::string& intf,
 }
 
 // -----------------------------------------------------------------------
-// cmdGetBoardInfo (0x50) — board product name from D-Bus inventory
-// Confirmed: megarac-bios-ipmi-methods §2.2
+// cmdGetInventory (0xE6) — board/system inventory from D-Bus
+// Confirmed: g_AMI_CmdHndlr 0xE6 CMD_AMI_GET_INVENTORY
 // Privilege: User
 //
-// Response: null-terminated ASCII product name (max 64 bytes incl. null)
+// Request:  [Byte 0] paramSelector
+//             0x00 = board/product info (default if absent)
+//             0x04 = device status bitmap (32 bytes, all 0x00 = online)
+//
+// Response for param 0x00:
+//   [0]     flags: 0x01 (data valid)
+//   [1-32]  ProductName  (null-padded, 32 bytes)
+//   [33-64] Manufacturer (null-padded, 32 bytes)
+//   [65-96] SerialNumber (null-padded, 32 bytes)
+//   [97-128] FirmwareVersion (null-padded, 32 bytes)
+//
+// Response for param 0x04:
+//   [0-31]  DevStatus bitmap (all 0x00 = all devices online)
 // -----------------------------------------------------------------------
 
-ipmi::RspType<std::vector<uint8_t>>
-    ipmiGetBoardInfo(ipmi::Context::ptr& /*ctx*/)
+static void copyField(std::vector<uint8_t>& out, const std::string& s,
+                      size_t maxLen)
 {
-    std::string productName = "ASRock X570D4I-2T"; // fallback
+    for (size_t i = 0; i < maxLen; ++i)
+        out.push_back(i < s.size() ? static_cast<uint8_t>(s[i]) : 0x00);
+}
+
+ipmi::RspType<std::vector<uint8_t>>
+    ipmiGetInventory(ipmi::Context::ptr& /*ctx*/,
+                     std::optional<uint8_t> paramSel)
+{
+    uint8_t param = paramSel.value_or(0x00);
+
+    // Device status: all zeroes = all online
+    if (param == 0x04)
+    {
+        std::vector<uint8_t> devStatus(32, 0x00);
+        return ipmi::responseSuccess(devStatus);
+    }
+
+    // Board/product info block
+    std::string productName  = "X570D4I-2T";
+    std::string manufacturer = "ASRock Rack";
+    std::string serialNumber;
+    std::string fwVersion;
 
     try
     {
         auto dbus = getSdBus();
         std::string svc = ipmi::getService(*dbus, itemBoardIntf, boardObjPath);
-        ipmi::Value v = ipmi::getDbusProperty(*dbus, svc, boardObjPath,
-                                               assetIntf, "Model");
-        const auto& name = std::get<std::string>(v);
-        if (!name.empty())
+
+        auto tryProp = [&](const char* prop) -> std::string {
+            try {
+                ipmi::Value v = ipmi::getDbusProperty(
+                    *dbus, svc, boardObjPath, assetIntf, prop);
+                return std::get<std::string>(v);
+            } catch (...) { return {}; }
+        };
+
+        if (auto n = tryProp("Model"); !n.empty())    productName  = n;
+        if (auto m = tryProp("Manufacturer"); !m.empty()) manufacturer = m;
+        if (auto s = tryProp("SerialNumber"); !s.empty()) serialNumber = s;
+    }
+    catch (...) {}
+
+    // Active BMC firmware version from xyz.openbmc_project.Software objects
+    try
+    {
+        auto dbus = getSdBus();
+        using ObjTree = std::map<sdbusplus::message::object_path,
+            std::map<std::string, std::map<std::string, ipmi::Value>>>;
+        auto msg = dbus->new_method_call(
+            "xyz.openbmc_project.ObjectMapper",
+            "/xyz/openbmc_project/object_mapper",
+            "xyz.openbmc_project.ObjectMapper", "GetSubTree");
+        msg.append(softwareRoot, 0,
+                   std::vector<std::string>{softwareIntf, activationIntf});
+        auto reply = dbus->call(msg);
+        ObjTree objs;
+        reply.read(objs);
+        for (const auto& [path, ifaces] : objs)
         {
-            productName = name;
+            if (!ifaces.count(activationIntf)) continue;
+            auto it = ifaces.find(softwareIntf);
+            if (it == ifaces.end()) continue;
+            auto vIt = it->second.find("Version");
+            if (vIt == it->second.end()) continue;
+            auto ver = std::get<std::string>(vIt->second);
+            if (!ver.empty()) { fwVersion = ver; break; }
         }
     }
-    catch (const std::exception& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::WARNING>(
-            "ipmiGetBoardInfo: D-Bus lookup failed, using fallback",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-    }
+    catch (...) {}
 
-    if (productName.size() > 63)
-    {
-        productName.resize(63);
-    }
-    productName.push_back('\0');
-
-    std::vector<uint8_t> data(productName.begin(), productName.end());
-    return ipmi::responseSuccess(data);
+    std::vector<uint8_t> resp;
+    resp.reserve(129);
+    resp.push_back(0x01); // flags: data valid
+    copyField(resp, productName,  32);
+    copyField(resp, manufacturer, 32);
+    copyField(resp, serialNumber, 32);
+    copyField(resp, fwVersion,    32);
+    return ipmi::responseSuccess(resp);
 }
 
 // -----------------------------------------------------------------------
@@ -561,11 +623,11 @@ static void registerOEMFunctions()
     phosphor::logging::log<phosphor::logging::level::INFO>(
         "ASRock OEM commands registered (NetFn 0x30)");
 
-    // Board info (0x50) — User
+    // AMI inventory (0xE6) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(netFnGeneral),
-                          static_cast<ipmi::Cmd>(general::cmdGetBoardInfo),
-                          ipmi::Privilege::User, ipmiGetBoardInfo);
+                          static_cast<ipmi::Cmd>(general::cmdGetInventory),
+                          ipmi::Privilege::User, ipmiGetInventory);
 
     // Sensor info (0x1E) — User
     ipmi::registerHandler(ipmi::prioOemBase,

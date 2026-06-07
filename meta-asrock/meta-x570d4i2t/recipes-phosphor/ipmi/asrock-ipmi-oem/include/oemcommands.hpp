@@ -115,12 +115,13 @@ static constexpr uint8_t cmdGetSelPolicy  = 0x30; // priv 0x13 (Admin)
 static constexpr uint8_t cmdSetSelPolicy  = 0x31; // priv 0xFF (disabled)
 
 // ------------------------------------------------------------------
-// ASRock board-specific
-// Confirmed: megarac-bios-ipmi-methods §2.2
+// AMI inventory query
+// Confirmed: g_AMI_CmdHndlr 0xE6 CMD_AMI_GET_INVENTORY
+// Note: 0x50 = CMD_AMI_GET_SERVICE_CONF (different command entirely)
 // ------------------------------------------------------------------
 
-// Return board product name from D-Bus FRU inventory
-static constexpr uint8_t cmdGetBoardInfo  = 0x50; // User
+// Return board/system inventory data from D-Bus FRU + Software objects
+static constexpr uint8_t cmdGetInventory  = 0xE6; // User
 
 // ------------------------------------------------------------------
 // KVM mux switching — controls GPIOJ1 (line 73) to mux SPI flash
