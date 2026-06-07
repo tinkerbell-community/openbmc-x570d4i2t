@@ -42,6 +42,7 @@ RDEPENDS:${PN}-fans = " \
 SUMMARY:${PN}-flash = "ASRock Flash"
 RDEPENDS:${PN}-flash = " \
         phosphor-ipmi-flash \
+        phosphor-ipmi-blobs \
         "
 
 SUMMARY:${PN}-system = "ASRock System"
@@ -52,4 +53,5 @@ RDEPENDS:${PN}-system = " \
         x570d4i2t-vga-enable \
         asrock-ipmi-oem \
         dbus-sensors \
+        phosphor-psu-monitor \
         "
