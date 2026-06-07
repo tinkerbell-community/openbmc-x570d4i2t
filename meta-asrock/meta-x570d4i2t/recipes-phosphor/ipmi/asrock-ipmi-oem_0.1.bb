@@ -37,7 +37,6 @@ SRC_URI = " \
     "
 
 S = "${UNPACKDIR}"
-
 DEPENDS = " \
     boost \
     nlohmann-json \
@@ -45,6 +44,9 @@ DEPENDS = " \
     phosphor-ipmi-host \
     phosphor-logging \
     sdbusplus \
+    systemd \
+    libgpiod \
+    libtinyxml2 \
     "
 
 inherit meson pkgconfig obmc-phosphor-ipmiprovider-symlink
