@@ -52,6 +52,7 @@ asrock_oem_deps = [
 asrockoemcmds_src = [
     'src/biosconfig.cpp',
     'src/oemcommands.cpp',
+    'src/smbiosmdrv2handler.cpp',
 ]
 
 library(

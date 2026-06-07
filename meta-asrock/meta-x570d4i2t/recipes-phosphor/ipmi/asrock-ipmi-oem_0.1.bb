@@ -24,6 +24,7 @@ SRC_URI = " \
     file://include/oemcommands.hpp \
     file://src/biosconfig.cpp \
     file://src/oemcommands.cpp \
+    file://src/smbiosmdrv2handler.cpp \
     "
 
 S = "${UNPACKDIR}"
