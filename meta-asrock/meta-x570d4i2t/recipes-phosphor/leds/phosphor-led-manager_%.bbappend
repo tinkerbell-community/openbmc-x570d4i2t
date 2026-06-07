@@ -1,7 +1,7 @@
-FILESEXTRAPATHS:prepend:x570d4i2t := "${THISDIR}/${PN}:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI:append:x570d4i2t = " file://led-group-config.json"
+SRC_URI:append = " file://led-group-config.json"
 
-do_install:append:x570d4i2t() {
+do_install:append() {
         install -m 0644 ${UNPACKDIR}/led-group-config.json ${D}${datadir}/phosphor-led-manager/
 }

@@ -35,9 +35,9 @@ Steps:
 3. Edit the existing bbappend at
    [meta-asrock/meta-x570d4i2t/recipes-kernel/linux/linux-aspeed_%.bbappend](../../meta-asrock/meta-x570d4i2t/recipes-kernel/linux/linux-aspeed_%25.bbappend):
    ```
-   FILESEXTRAPATHS:prepend:x570d4i2t := "${THISDIR}/linux-aspeed:"
+   FILESEXTRAPATHS:prepend := "${THISDIR}/linux-aspeed:"
 
-   SRC_URI:append:x570d4i2t = " \
+   SRC_URI:append = " \
        file://x570d4i2t.cfg \
        file://0001-aspeed-add-x570d4i2t-dts.patch \
        "

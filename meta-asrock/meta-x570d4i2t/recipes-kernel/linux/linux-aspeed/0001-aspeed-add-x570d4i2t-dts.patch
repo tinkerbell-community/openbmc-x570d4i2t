@@ -29,8 +29,8 @@ phosphor-led-manager led-group-config.json to target them by name.
 Signed-off-by: ASRock OpenBMC port <noreply@example.com>
 ---
  arch/arm/boot/dts/aspeed/Makefile                  |   1 +
- .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 345 ++++++++++++++++++
- 2 files changed, 346 insertions(+)
+ .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 325 ++++++++++++++++++
+ 2 files changed, 326 insertions(+)
  create mode 100644 arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
 
 diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
@@ -339,26 +339,12 @@ new file mode 100644
 +	status = "okay";
 +};
 +
-+&i2c9 {
-+	/* Diagnostic enable — probe for unknown devices */
-+	status = "okay";
-+};
-+
-+&i2c10 {
-+	status = "okay";
-+};
-+
-+&i2c11 {
-+	status = "okay";
-+};
-+
-+&i2c12 {
-+	status = "okay";
-+};
-+
-+&i2c13 {
-+	status = "okay";
-+};
++/*
++ * i2c9: probing shows I2C mux chips at 0x72-0x77 (busy — already claimed).
++ * No declared devices; leave disabled until topology is mapped.
++ * i2c10/i2c11: return "Error reading bus" — no physical connections.
++ * i2c12/i2c13: no known devices, leave disabled.
++ */
 +
 +&i2c7 {
 +	/* FRU and SPD EEPROM SMBus — also holds MAC addresses in NVMEM */
@@ -417,9 +403,12 @@ new file mode 100644
 +};
 +
 +&lpc_snoop {
-+	/* POST code snooping on LPC port 0x80 — 2-byte AGESA codes captured */
++	/*
++	 * AMD AGESA generates 2-byte POST codes: byte-low on port 0x80,
++	 * byte-high on port 0x81. Snoop both for full AGESA code capture.
++	 */
 +	status = "okay";
-+	snoop-ports = <0x80>;
++	snoop-ports = <0x80 0x81>;
 +};
 +
 +&p2a {

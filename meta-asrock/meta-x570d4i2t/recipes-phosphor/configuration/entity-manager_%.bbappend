@@ -1,8 +1,18 @@
-FILESEXTRAPATHS:prepend:x570d4i2t := "${THISDIR}/${PN}:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI:append:x570d4i2t = " file://x570d4i2t.json"
+SRC_URI:append = " \
+    file://x570d4i2t.json \
+    file://blacklist.json \
+    "
 
-do_install:append:x570d4i2t() {
-        install -m 0444 ${UNPACKDIR}/x570d4i2t.json \
-            ${D}${datadir}/entity-manager/configurations/
+do_install:append() {
+    install -m 0644 ${UNPACKDIR}/x570d4i2t.json \
+        ${D}${datadir}/entity-manager/x570d4i2t.json
+    install -m 0644 ${UNPACKDIR}/blacklist.json \
+        ${D}${datadir}/entity-manager/blacklist.json
 }
+
+FILES:${PN}:append = " \
+    ${datadir}/entity-manager/x570d4i2t.json \
+    ${datadir}/entity-manager/blacklist.json \
+    "

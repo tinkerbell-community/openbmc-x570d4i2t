@@ -129,9 +129,9 @@ CONFIG_DEBUG_FS=y
 After [03-device-tree.md](03-device-tree.md) produces a patch:
 
 ```bitbake
-FILESEXTRAPATHS:prepend:x570d4i2t := "${THISDIR}/linux-aspeed:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/linux-aspeed:"
 
-SRC_URI:append:x570d4i2t = " \
+SRC_URI:append = " \
     file://x570d4i2t.cfg \
     file://0001-aspeed-add-x570d4i2t-dts.patch \
     "

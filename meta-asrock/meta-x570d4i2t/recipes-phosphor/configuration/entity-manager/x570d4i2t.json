@@ -327,7 +327,7 @@
     "xyz.openbmc_project.Inventory.Decorator.Asset": {
         "Manufacturer": "ASRockRack",
         "Model": "X570D4I-2T",
-        "PartNumber": "",
+        "PartNumber": "$PRODUCT_PART_NUMBER",
         "SerialNumber": "$PRODUCT_SERIAL_NUMBER"
     },
     "xyz.openbmc_project.Inventory.Item.System": {}

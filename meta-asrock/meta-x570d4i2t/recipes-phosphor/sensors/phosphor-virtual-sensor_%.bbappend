@@ -9,14 +9,14 @@
 # /xyz/openbmc_project/sensors/fan_tach/{FanTach_CPU,FanTach_Chassis}, which is
 # exactly where the Pid "Inputs" resolve. This replaces the fake-tach loop that
 # used to live in nct6779-bridge.
-FILESEXTRAPATHS:prepend:x570d4i2t := "${THISDIR}/${PN}:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI:append:x570d4i2t = " file://config-virtual-sensor.json"
+SRC_URI:append = " file://config-virtual-sensor.json"
 
-do_install:append:x570d4i2t() {
+do_install:append() {
     install -d ${D}${datadir}/${PN}
     install -m 0644 ${UNPACKDIR}/config-virtual-sensor.json \
         ${D}${datadir}/${PN}/virtual_sensor_config.json
 }
 
-FILES:${PN}:append:x570d4i2t = " ${datadir}/${PN}/virtual_sensor_config.json"
+FILES:${PN}:append = " ${datadir}/${PN}/virtual_sensor_config.json"
