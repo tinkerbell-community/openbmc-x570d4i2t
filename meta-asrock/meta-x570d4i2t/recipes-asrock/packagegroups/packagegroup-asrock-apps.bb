@@ -53,5 +53,4 @@ RDEPENDS:${PN}-system = " \
         x570d4i2t-vga-enable \
         asrock-ipmi-oem \
         dbus-sensors \
-        phosphor-psu-monitor \
         "
