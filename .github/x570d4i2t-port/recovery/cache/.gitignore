@@ -1,0 +1,3 @@
+# Proprietary AMI binaries (download via x570-recover.sh deps) + build outputs — do not commit
+*
+!.gitignore

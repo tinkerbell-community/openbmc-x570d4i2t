@@ -1,0 +1,365 @@
+From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
+From: OpenBMC <openbmc@example.com>
+Date: Fri, 06 Jun 2026 00:00:00 +0000
+Subject: [PATCH] Use Bootstrap 5 CSS variables in custom SCSS
+
+Replace static SCSS function calls (theme-color(), theme-color-light())
+with Bootstrap 5 CSS custom properties (var(--bs-*)). These CSS
+variables automatically shift for light/dark mode when
+$color-mode-type: media-query is set, enabling proper automatic
+theme adaptation without hard-coded computed colours.
+
+Mappings applied:
+  theme-color('X')       → var(--bs-X)
+  theme-color-light('X') → var(--bs-X-bg-subtle)
+  theme-color-dark('light') → var(--bs-tertiary-bg)
+
+---
+ src/assets/styles/bmc/custom/_alert.scss    | 24 ++++++------
+ src/assets/styles/bmc/custom/_badge.scss    |  8 ++--
+ src/assets/styles/bmc/custom/_buttons.scss  | 12 +++---
+ src/assets/styles/bmc/custom/_dropdown.scss |  2 +-
+ src/assets/styles/bmc/custom/_forms.scss    | 10 ++---
+ src/assets/styles/bmc/custom/_tables.scss   |  8 ++--
+ src/assets/styles/bmc/custom/_toasts.scss   | 44 ++++++++++----------
+ 7 files changed, 54 insertions(+), 54 deletions(-)
+
+diff --git a/src/assets/styles/bmc/custom/_alert.scss b/src/assets/styles/bmc/custom/_alert.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_alert.scss
++++ b/src/assets/styles/bmc/custom/_alert.scss
+@@ -54,26 +54,26 @@
+ // Alert variant styles
+ .alert {
+     &.alert-info {
+-        border-inline-start-color: theme-color('info');
+-        background-color: theme-color-light('info');
+-        fill: theme-color('info');
++        border-inline-start-color: var(--bs-info);
++        background-color: var(--bs-info-bg-subtle);
++        fill: var(--bs-info);
+     }
+ 
+     &.alert-success {
+-        border-inline-start-color: theme-color('success');
+-        background-color: theme-color-light('success');
+-        fill: theme-color('success');
++        border-inline-start-color: var(--bs-success);
++        background-color: var(--bs-success-bg-subtle);
++        fill: var(--bs-success);
+     }
+ 
+     &.alert-danger {
+-        border-inline-start-color: theme-color('danger');
+-        background-color: theme-color-light('danger');
+-        fill: theme-color('danger');
++        border-inline-start-color: var(--bs-danger);
++        background-color: var(--bs-danger-bg-subtle);
++        fill: var(--bs-danger);
+     }
+ 
+     &.alert-warning {
+-        border-inline-start-color: theme-color('warning');
+-        background-color: theme-color-light('warning');
+-        fill: theme-color('warning');
++        border-inline-start-color: var(--bs-warning);
++        background-color: var(--bs-warning-bg-subtle);
++        fill: var(--bs-warning);
+     }
+ }
+diff --git a/src/assets/styles/bmc/custom/_badge.scss b/src/assets/styles/bmc/custom/_badge.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_badge.scss
++++ b/src/assets/styles/bmc/custom/_badge.scss
+@@ -16,11 +16,11 @@
+ }
+ 
+ .badge-primary {
+-    background-color: theme-color-light('info');
+-    color: theme-color('info');
++    background-color: var(--bs-info-bg-subtle);
++    color: var(--bs-info);
+ }
+ 
+ .text-bg-secondary {
+-    background-color: theme-color-light('info') !important;
+-    color: theme-color('info') !important;
++    background-color: var(--bs-info-bg-subtle) !important;
++    color: var(--bs-info) !important;
+ }
+diff --git a/src/assets/styles/bmc/custom/_buttons.scss b/src/assets/styles/bmc/custom/_buttons.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_buttons.scss
++++ b/src/assets/styles/bmc/custom/_buttons.scss
+@@ -28,7 +28,7 @@
+     &:not(:disabled):not(.disabled):active:focus {
+         border-color: $white;
+         box-shadow:
+-            inset 0 0 0 3px theme-color('primary'),
++            inset 0 0 0 3px var(--bs-primary),
+             inset 0 0 0 5px $white;
+     }
+ }
+@@ -39,7 +39,7 @@
+     &:not(:disabled):not(.disabled):active:focus {
+         border-color: $white;
+         box-shadow:
+-            inset 0 0 0 3px theme-color('secondary'),
++            inset 0 0 0 3px var(--bs-secondary),
+             inset 0 0 0 5px $white;
+     }
+ }
+@@ -47,18 +47,18 @@
+ // Global style for all button link
+ .btn-link {
+     font-weight: $headings-font-weight;
+-    fill: theme-color('primary');
++    fill: var(--bs-primary);
+     text-decoration: none !important;
+     &:hover {
+         background-color: $gray-200;
+-        color: theme-color('primary');
++        color: var(--bs-primary);
+     }
+     &:active {
+         background-color: $gray-300;
+     }
+     &:focus {
+-        box-shadow: inset 0 0 0 2px theme-color('primary');
+-        color: theme-color('primary');
++        box-shadow: inset 0 0 0 2px var(--bs-primary);
++        color: var(--bs-primary);
+         outline: none;
+     }
+     &:disabled {
+diff --git a/src/assets/styles/bmc/custom/_dropdown.scss b/src/assets/styles/bmc/custom/_dropdown.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_dropdown.scss
++++ b/src/assets/styles/bmc/custom/_dropdown.scss
+@@ -39,7 +39,7 @@
+         &:focus {
+             outline: none;
+             background-color: transparent;
+-            box-shadow: inset 0 0 0 2px theme-color('primary');
++            box-shadow: inset 0 0 0 2px var(--bs-primary);
+         }
+     }
+ 
+diff --git a/src/assets/styles/bmc/custom/_forms.scss b/src/assets/styles/bmc/custom/_forms.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_forms.scss
++++ b/src/assets/styles/bmc/custom/_forms.scss
+@@ -38,7 +38,7 @@
+     }
+ 
+     &:focus {
+-        color: theme-color('dark');
++        color: var(--bs-dark);
+         background-color: $gray-100;
+         box-shadow:
+             inset 0 0 0 3px $gray-100,
+@@ -56,7 +56,7 @@
+ 
+     &.is-invalid,
+     &:invalid {
+-        border: 1px solid theme-color('danger') !important;
++        border: 1px solid var(--bs-danger) !important;
+     }
+ }
+ 
+@@ -65,7 +65,7 @@
+ .custom-control-label,
+ .form-check-label,
+ .form-control {
+-    color: theme-color('dark') !important;
++    color: var(--bs-dark) !important;
+     font-size: 1rem;
+ }
+ 
+@@ -152,11 +152,11 @@
+ }
+ 
+ .custom-control-input:focus ~ .custom-control-label::before {
+-    box-shadow: 0 0 0 2px theme-color('primary');
++    box-shadow: 0 0 0 2px var(--bs-primary);
+ }
+ 
+ .form-check-input:focus {
+-    box-shadow: 0 0 0 2px theme-color('primary');
++    box-shadow: 0 0 0 2px var(--bs-primary);
+ }
+ 
+ .custom-control-label::after,
+@@ -175,7 +175,7 @@
+     margin-inline-end: -$spacer;
+ 
+     &.btn-link-primary {
+-        color: theme-color('primary');
++        color: var(--bs-primary);
+         fill: currentColor;
+     }
+ }
+diff --git a/src/assets/styles/bmc/custom/_tables.scss b/src/assets/styles/bmc/custom/_tables.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_tables.scss
++++ b/src/assets/styles/bmc/custom/_tables.scss
+@@ -38,7 +38,7 @@
+         &:last-of-type {
+             border-inline-end: 1px solid $gray-300;
+         }
+-        color: theme-color('dark');
++        color: var(--bs-dark);
+         &:focus {
+             outline: none;
+         }
+@@ -61,7 +61,7 @@
+     }
+ 
+     .b-table-details {
+-        background-color: theme-color('light');
++        background-color: var(--bs-light);
+         td {
+             padding-inline-start: calc(50px + (#{$table-cell-padding-x} * 2));
+             padding-inline-end: calc(50px + (#{$table-cell-padding-x} * 2));
+@@ -85,7 +85,7 @@
+             padding: 0;
+         }
+         svg {
+-            fill: theme-color('dark');
++            fill: var(--bs-dark);
+         }
+     }
+     .b-table-sort-icon-left {
+@@ -93,10 +93,10 @@
+         padding-inline-start: calc(1.2rem + 0.65em) !important;
+         &:focus {
+             outline: none;
+-            box-shadow: inset 0 0 0 2px theme-color('primary') !important;
++            box-shadow: inset 0 0 0 2px var(--bs-primary) !important;
+         }
+         &:hover {
+-            background-color: theme-color-dark('light');
++            background-color: var(--bs-tertiary-bg);
+         }
+     }
+ }
+diff --git a/src/assets/styles/bmc/custom/_toasts.scss b/src/assets/styles/bmc/custom/_toasts.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_toasts.scss
++++ b/src/assets/styles/bmc/custom/_toasts.scss
+@@ -28,7 +28,7 @@
+     align-items: flex-start;
+     background-color: inherit !important; //override specificity
+     border: none;
+-    color: theme-color('dark') !important; //override specificity
++    color: var(--bs-dark) !important; //override specificity
+     padding-bottom: calc(#{$spacer} / 4); // spacing between header and body
+ }
+ 
+@@ -46,7 +46,7 @@
+ }
+ 
+ .toast-body {
+-    color: theme-color('dark');
++    color: var(--bs-dark);
+     padding-top: calc(#{$spacer} / 4); // spacing below header
+     white-space: pre-line; // Preserve newlines from \n characters
+     line-height: 1.6; // Better line spacing for multi-line content and timestamps
+@@ -54,44 +54,44 @@
+ 
+ // Bootstrap Vue 2 class names (backward compatibility)
+ .b-toast-success .toast {
+-    border-inline-start-color: theme-color('success') !important;
+-    background-color: theme-color-light('success') !important;
++    border-inline-start-color: var(--bs-success) !important;
++    background-color: var(--bs-success-bg-subtle) !important;
+ }
+ 
+ .b-toast-info .toast {
+-    border-inline-start-color: theme-color('info') !important;
+-    background-color: theme-color-light('info') !important;
++    border-inline-start-color: var(--bs-info) !important;
++    background-color: var(--bs-info-bg-subtle) !important;
+ }
+ 
+ .b-toast-danger .toast {
+-    border-inline-start-color: theme-color('danger') !important;
+-    background-color: theme-color-light('danger') !important;
++    border-inline-start-color: var(--bs-danger) !important;
++    background-color: var(--bs-danger-bg-subtle) !important;
+ }
+ 
+ .b-toast-warning .toast {
+-    border-inline-start-color: theme-color('warning') !important;
+-    background-color: theme-color-light('warning') !important;
++    border-inline-start-color: var(--bs-warning) !important;
++    background-color: var(--bs-warning-bg-subtle) !important;
+ }
+ 
+ // Bootstrap Vue Next class names
+ .toast.bg-success {
+-    border-inline-start-color: theme-color('success') !important;
+-    background-color: theme-color-light('success') !important;
++    border-inline-start-color: var(--bs-success) !important;
++    background-color: var(--bs-success-bg-subtle) !important;
+ }
+ 
+ .toast.bg-info {
+-    border-inline-start-color: theme-color('info') !important;
+-    background-color: theme-color-light('info') !important;
++    border-inline-start-color: var(--bs-info) !important;
++    background-color: var(--bs-info-bg-subtle) !important;
+ }
+ 
+ .toast.bg-danger {
+-    border-inline-start-color: theme-color('danger') !important;
+-    background-color: theme-color-light('danger') !important;
++    border-inline-start-color: var(--bs-danger) !important;
++    background-color: var(--bs-danger-bg-subtle) !important;
+ }
+ 
+ .toast.bg-warning {
+-    border-inline-start-color: theme-color('warning') !important;
+-    background-color: theme-color-light('warning') !important;
++    border-inline-start-color: var(--bs-warning) !important;
++    background-color: var(--bs-warning-bg-subtle) !important;
+ }
+ 
+ // Override Bootstrap's solid variant backgrounds
+@@ -99,25 +99,25 @@
+ .toast.text-bg-info,
+ .toast.text-bg-danger,
+ .toast.text-bg-warning {
+-    color: theme-color('dark') !important;
++    color: var(--bs-dark) !important;
+ }
+ 
+ .toast.text-bg-success {
+-    border-inline-start-color: theme-color('success') !important;
+-    background-color: theme-color-light('success') !important;
++    border-inline-start-color: var(--bs-success) !important;
++    background-color: var(--bs-success-bg-subtle) !important;
+ }
+ 
+ .toast.text-bg-info {
+-    border-inline-start-color: theme-color('info') !important;
+-    background-color: theme-color-light('info') !important;
++    border-inline-start-color: var(--bs-info) !important;
++    background-color: var(--bs-info-bg-subtle) !important;
+ }
+ 
+ .toast.text-bg-danger {
+-    border-inline-start-color: theme-color('danger') !important;
+-    background-color: theme-color-light('danger') !important;
++    border-inline-start-color: var(--bs-danger) !important;
++    background-color: var(--bs-danger-bg-subtle) !important;
+ }
+ 
+ .toast.text-bg-warning {
+-    border-inline-start-color: theme-color('warning') !important;
+-    background-color: theme-color-light('warning') !important;
++    border-inline-start-color: var(--bs-warning) !important;
++    background-color: var(--bs-warning-bg-subtle) !important;
+ }
+-- 
+2.39.0

@@ -32,12 +32,6 @@
 			reg = <0x9a000000 0x00010000>; /* 64K */
 		};
 
-		xdma_memory: region@9ff00000 {
-			no-map;
-			compatible = "shared-dma-pool";
-			reg = <0x9ff00000 0x00100000>; /* 1MB DMA buffer for aspeed-xdma */
-		};
-
 		video_engine_memory: jpegbuffer {
 			size = <0x02800000>;	/* 40M */
 			alignment = <0x01000000>;
@@ -146,10 +140,8 @@
 	};
 };
 
-&xdma {
-	status = "okay";
-	memory-region = <&xdma_memory>;
-};
+/* NOTE: do NOT enable &xdma — it clears the SCU VGA_EN bit and steals the
+ * host PCIe VGA function (1a03:2000 -> 1a03:2402 class 0xff), killing KVM video. */
 
 &uart5 {
 	status = "okay";
