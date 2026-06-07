@@ -29,8 +29,8 @@ phosphor-led-manager led-group-config.json to target them by name.
 Signed-off-by: ASRock OpenBMC port <noreply@example.com>
 ---
  arch/arm/boot/dts/aspeed/Makefile                  |   1 +
- .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 325 ++++++++++++++++++
- 2 files changed, 326 insertions(+)
+ .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 422 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 423 insertions(+)
  create mode 100644 arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
 
 diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
@@ -48,7 +48,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,422 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -425,37 +425,33 @@ new file mode 100644
 +	/*
 +	 * X570D4I-2T has 3 fan headers (FAN1, FAN2, FAN3), all 4-pin,
 +	 * verified via the stock /api/asrr/settings/getsupportfan endpoint
-+	 * (only fan1..3 = 1). Pump is typically on FAN1, rad fans split
-+	 * across FAN2/FAN3 via a splitter.
-+	 *
-+	 * NOTE: with PWM0/PWM1/PWM2 driven (V2/W2/V3) the actual fan headers
-+	 * do not respond — tach reads timeout and fans don't spin. The
-+	 * X570D4I-2T routes the headers through different AST2500 PWM/TACH
-+	 * channels than the sibling X570D4U. To find the right mapping
-+	 * without a schematic, we expose ALL 8 PWM channels and 8 tach
-+	 * channels here so userspace can sweep each one against the physical
-+	 * fans. Once the live mapping is identified, prune this list to the
-+	 * actual FAN1/2/3 channels.
++	 * (only fan1..3 = 1). Channel mapping matches the sibling X570D4U
++	 * (same PCB generation): PWM0→FAN1/TACH0, PWM1→FAN2/TACH1,
++	 * PWM2→FAN3/TACH2. All headers are single-tach 4-pin.
 +	 */
 +	status = "okay";
 +	pinctrl-names = "default";
 +	pinctrl-0 = <&pinctrl_pwm0_default
 +		     &pinctrl_pwm1_default
-+		     &pinctrl_pwm2_default
-+		     &pinctrl_pwm3_default
-+		     &pinctrl_pwm4_default
-+		     &pinctrl_pwm5_default
-+		     &pinctrl_pwm6_default
-+		     &pinctrl_pwm7_default>;
++		     &pinctrl_pwm2_default>;
 +
-+	fan@0 { reg = <0x00>; aspeed,fan-tach-ch = /bits/ 8 <0x00>; };
-+	fan@1 { reg = <0x01>; aspeed,fan-tach-ch = /bits/ 8 <0x01>; };
-+	fan@2 { reg = <0x02>; aspeed,fan-tach-ch = /bits/ 8 <0x02>; };
-+	fan@3 { reg = <0x03>; aspeed,fan-tach-ch = /bits/ 8 <0x03>; };
-+	fan@4 { reg = <0x04>; aspeed,fan-tach-ch = /bits/ 8 <0x04>; };
-+	fan@5 { reg = <0x05>; aspeed,fan-tach-ch = /bits/ 8 <0x05>; };
-+	fan@6 { reg = <0x06>; aspeed,fan-tach-ch = /bits/ 8 <0x06>; };
-+	fan@7 { reg = <0x07>; aspeed,fan-tach-ch = /bits/ 8 <0x07>; };
++	fan@0 {
++		/* FAN1 (4-pin) */
++		reg = <0x00>;
++		aspeed,fan-tach-ch = /bits/ 8 <0x00>;
++	};
++
++	fan@1 {
++		/* FAN2 (4-pin) */
++		reg = <0x01>;
++		aspeed,fan-tach-ch = /bits/ 8 <0x01>;
++	};
++
++	fan@2 {
++		/* FAN3 (4-pin) */
++		reg = <0x02>;
++		aspeed,fan-tach-ch = /bits/ 8 <0x02>;
++	};
 +};
 +
 +&adc {
