@@ -8,3 +8,4 @@ customrc
 *.ima
 *.EXE
 *.zip
+.claude/scheduled_tasks.lock

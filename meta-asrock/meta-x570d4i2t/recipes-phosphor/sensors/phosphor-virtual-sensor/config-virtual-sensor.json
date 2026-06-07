@@ -1,0 +1,22 @@
+[
+    {
+        "Desc": {
+            "Name": "FanTach_CPU",
+            "SensorType": "fan_tach",
+            "MaxValue": 25000.0,
+            "MinValue": 0.0
+        },
+        "Params": {},
+        "Expression": "1500"
+    },
+    {
+        "Desc": {
+            "Name": "FanTach_Chassis",
+            "SensorType": "fan_tach",
+            "MaxValue": 25000.0,
+            "MinValue": 0.0
+        },
+        "Params": {},
+        "Expression": "1500"
+    }
+]

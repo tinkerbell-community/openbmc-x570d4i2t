@@ -20,11 +20,12 @@ Upstream-Status: Inappropriate [X570D4I-2T board-specific webui-vue theming]
  src/assets/styles/bmc/custom/_alert.scss    | 24 ++++++------
  src/assets/styles/bmc/custom/_badge.scss    |  8 ++--
  src/assets/styles/bmc/custom/_buttons.scss  | 12 +++---
+ src/assets/styles/bmc/custom/_card.scss     |  2 +-
  src/assets/styles/bmc/custom/_dropdown.scss |  2 +-
  src/assets/styles/bmc/custom/_forms.scss    | 10 ++---
  src/assets/styles/bmc/custom/_tables.scss   |  8 ++--
  src/assets/styles/bmc/custom/_toasts.scss   | 44 ++++++++++----------
- 7 files changed, 54 insertions(+), 54 deletions(-)
+ 8 files changed, 56 insertions(+), 56 deletions(-)
 
 diff --git a/src/assets/styles/bmc/custom/_alert.scss b/src/assets/styles/bmc/custom/_alert.scss
 index 0000000..0000001 100644
@@ -134,6 +135,18 @@ index 0000000..0000001 100644
          outline: none;
      }
      &:disabled {
+diff --git a/src/assets/styles/bmc/custom/_card.scss b/src/assets/styles/bmc/custom/_card.scss
+index 0000000..0000001 100644
+--- a/src/assets/styles/bmc/custom/_card.scss
++++ b/src/assets/styles/bmc/custom/_card.scss
+@@ -1,6 +1,6 @@
+ .card {
+     .bg-success {
+-        background-color: theme-color-light('success') !important;
++        background-color: var(--bs-success-bg-subtle) !important;
+     }
+ }
+ 
 diff --git a/src/assets/styles/bmc/custom/_dropdown.scss b/src/assets/styles/bmc/custom/_dropdown.scss
 index 0000000..0000001 100644
 --- a/src/assets/styles/bmc/custom/_dropdown.scss
