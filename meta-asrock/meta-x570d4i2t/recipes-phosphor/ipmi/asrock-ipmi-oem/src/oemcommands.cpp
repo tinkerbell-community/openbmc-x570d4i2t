@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) ASRock-Rack Inc.
 //
-// ASRock OEM IPMI command handlers for the X570D4I-2T (NetFn 0x30).
+// ASRock OEM IPMI command handlers for the X570D4I-2T (NetFn 0x3A).
 //
 // This file mirrors the structure of intel-ipmi-oem/src/oemcommands.cpp
 // while replacing Intel-specific NetFn assignments and business logic
 // with the Megarac/AMI equivalents extracted from the v01.91.00 firmware
 // (see bmc-analyze.instructions.md and megarac-bios-ipmi-methods.instructions.md).
 //
-// Implemented handlers (all on NetFn 0x30 / NETFN_AMI):
+// Implemented handlers (all on NetFn 0x3A / ipmi::netFnOemSix):
 //
 //   cmdGetInventory  (0xE6) — board/system inventory from D-Bus FRU + Software objects
 //   cmdGetSensorInfo (0x1E) — sensor name/type list from D-Bus dbus-sensors
@@ -624,7 +624,7 @@ static ipmi::RspType<> ipmiYafuStub(ipmi::Context::ptr& /*ctx*/,
 static void registerOEMFunctions()
 {
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "ASRock OEM commands registered (NetFn 0x30)");
+        "ASRock OEM commands registered (NetFn 0x3A / netFnOemSix)");
 
     // AMI inventory (0xE6) — User
     ipmi::registerHandler(ipmi::prioOemBase,

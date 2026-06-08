@@ -645,22 +645,22 @@ static void registerBIOSConfigFunctions()
     initNVOOBdata();
 
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          ipmi::netFnOemSix,
                           static_cast<ipmi::Cmd>(general::cmdSetBIOSCap),
                           ipmi::Privilege::Admin, ipmiSetBIOSCap);
 
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          ipmi::netFnOemSix,
                           static_cast<ipmi::Cmd>(general::cmdGetBIOSCap),
                           ipmi::Privilege::User, ipmiGetBIOSCap);
 
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          ipmi::netFnOemSix,
                           static_cast<ipmi::Cmd>(general::cmdSetPayload),
                           ipmi::Privilege::Admin, ipmiSetPayload);
 
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          ipmi::netFnOemSix,
                           static_cast<ipmi::Cmd>(general::cmdGetPayload),
                           ipmi::Privilege::User, ipmiGetPayload);
 }

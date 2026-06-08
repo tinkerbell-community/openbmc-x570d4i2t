@@ -7,7 +7,7 @@
 // from bmc-analyze (libipmimsghndlr.so g_AMI_CmdHndlr table) and the
 // megarac-bios-ipmi-methods implementation reference.
 //
-// NetFn 0x30 (NETFN_AMI / OEM General):
+// NetFn 0x3A (ipmi::netFnOemSix / NETFN_AMI):
 //   - BIOS OOB configuration protocol
 //   - AMI YAFU-replacement stubs
 //   - Board-info and sensor-info commands
@@ -32,13 +32,11 @@ namespace asrock
 // Network Functions
 // -----------------------------------------------------------------------
 
-// NetFn 0x30 — AMI OEM General (NETFN_AMI in Megarac)
-// Used for all AMI/ASRock OEM commands: BIOS OOB, sensor queries,
-// KVM mux, PECI, PSU, firmware version, and board identity.
-static constexpr uint8_t netFnGeneral = 0x30;
+// All AMI/ASRock OEM commands use NetFn 0x3A (ipmi::netFnOemSix):
+// BIOS OOB, sensor queries, KVM mux, PECI, PSU, firmware version, board ID.
 
 // -----------------------------------------------------------------------
-// NETFN_AMI (0x30) command codes
+// netFnOemSix (0x3A) command codes
 // -----------------------------------------------------------------------
 
 namespace general
