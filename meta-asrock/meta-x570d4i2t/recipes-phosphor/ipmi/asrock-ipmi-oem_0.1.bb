@@ -25,8 +25,10 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://meson.build \
     file://meson.options \
+    file://include/amiconverter.hpp \
     file://include/biosconfig.hpp \
     file://include/oemcommands.hpp \
+    file://src/amiconverter.cpp \
     file://src/appcommands.cpp \
     file://src/biosconfig.cpp \
     file://src/chassiscommands.cpp \

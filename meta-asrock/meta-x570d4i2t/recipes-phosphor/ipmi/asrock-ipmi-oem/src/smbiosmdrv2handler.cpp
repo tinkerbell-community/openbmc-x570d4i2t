@@ -1,50 +1,56 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) ASRock-Rack Inc.
 //
-// MDR2 (Managed Data Region version 2) SMBIOS IPMI command handlers for
-// the ASRock X570D4I-2T BMC.
+// AMI Aptio V SMBIOS push handlers for the X570D4I-2T BMC.
 //
-// Architecture
-// ------------
-// The OpenBMC `smbiosmdrv2app` daemon owns the D-Bus interface
-//   xyz.openbmc_project.Smbios.MDR_V2 @ /xyz/openbmc_project/Smbios/MDR_V2
-// and maintains the in-memory SMBIOS directory structure.  This file
-// provides the IPMI→D-Bus bridge that lets the host BIOS push SMBIOS
-// tables to the BMC over the KCS/SMM channel.
+// The ASRock X570D4I-2T BIOS uses AMI-proprietary IPMI commands on NetFn 0x3A
+// (netFnOemSix) to push SMBIOS data to the BMC, NOT the standard Intel MDR2
+// protocol on NetFn 0x3E.
 //
-// All 12 MDR2 commands are implemented, matching the command codes and
-// NetFn (0x3E / netFnOemEight) used by intel-ipmi-oem so that any BIOS
-// firmware built against the standard phosphor OOB MDR2 protocol works
-// without modification.
+// Two surfaces are implemented:
 //
-// Transfer flow (host BIOS → BMC during POST)
-// -------------------------------------------
-// 1. AgentStatus      – BIOS checks BMC directory version; BMC signals
-//                       whether it needs an update.
-// 2. GetDir           – BIOS reads the current directory (data set IDs).
-// 3. SendDir          – BIOS writes its directory to the BMC.
-// 4. DataInfoOffer    – BMC offers a data-set ID slot.
-// 5. GetDataInfo      – BIOS queries current data-set metadata.    ← this cmd
-// 6. SendDataInfo     – BIOS declares the size/version/timestamp.
-// 7. DataStart        – BIOS opens a write session; BMC maps shared memory.
-// 8. SendDataBlock×N  – BIOS writes SMBIOS chunks via shared memory.
-// 9. DataDone         – BIOS closes the session; BMC parses SMBIOS → D-Bus.
+//   AMI proprietary push (from BIOS modules SendInfoBmcIpmiDxe, ChassisIdDxe,
+//   BackupBmcMacDxe, SetBiosInfoDxe):
+//     0xF3  GetStatus      — BIOS polls BMC readiness
+//     0xB2  SetBiosInfo    — BIOS overlays 16 bytes into SMBIOS Type 0
+//     0xA0  SetMdrPos      — actually BackupBmcMacDxe in this BIOS RE;
+//                            body = [LAN_channel:1][mac:6]
+//     0xA1  GetMdrStatus   — BIOS reads current region size + checksum
+//     0xB5  SetSmbiosChunk — body=[reserved:1=0x00][ASCII...][NUL:1];
+//                            each call auto-advances through kAmiSlotTable
 //
-// Reference: intel-ipmi-oem/src/smbiosmdrv2handler.cpp
+//   AMI MDR V2 (reader/writer over IPMI):
+//     0x30  AgentStatus   — BIOS probes MDR agent readiness
+//     0x31  GetDir        — BIOS reads region directory
+//     0x3D  GetStatus     — BIOS reads MDR region status
+//     0x51  WriteBegin    — BIOS opens a write session
+//     0x52  WriteChunk    — BIOS sends SMBIOS chunks
+//     0x53  WriteEnd      — BIOS signals done; BMC persists + triggers sync
+//     0x71  RegionStatus  — BIOS reads per-region status
+//     0x72  GetBlock      — BIOS/BMC reads SMBIOS or meta-header region
+//
+// All handlers are registered at prioOpenBmcBase on netFnOemSix (0x3A) so
+// they take precedence over any lower-priority handlers.
+//
+// At library load, g_amiBuf is seeded from /var/lib/smbios/smbios2 then
+// overlaid with FRU EEPROM data (/sys/bus/i2c/devices/7-0057/eeprom).
+//
+// Reference: tinkerbell-community/openbmc-x570d4i2t branch oem-ipmi,
+//            ami-ipmi-oem/legacy.cpp
 
+#include <amiconverter.hpp>
 #include <oemcommands.hpp>
 
 #include <ipmid/api.hpp>
-#include <ipmid/message.hpp>
-#include <ipmid/types.hpp>
 #include <ipmid/utils.hpp>
 #include <phosphor-logging/log.hpp>
-#include <sdbusplus/bus.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
-#include <ctime>
-#include <filesystem>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -52,942 +58,847 @@
 namespace asrock
 {
 
-// -----------------------------------------------------------------------
-// D-Bus constants for the smbios-mdr service
-// -----------------------------------------------------------------------
+// ── Command codes on NetFn 0x3A ──────────────────────────────────────────────
 
-static constexpr const char* mdrv2Path =
-    "/xyz/openbmc_project/Smbios/MDR_V2";
-static constexpr const char* mdrv2Interface =
-    "xyz.openbmc_project.Smbios.MDR_V2";
-static constexpr const char* dbusProperties =
-    "org.freedesktop.DBus.Properties";
+constexpr ipmi::Cmd kCmdMdrAgentStatus  = 0x30;
+constexpr ipmi::Cmd kCmdMdrGetDir       = 0x31;
+constexpr ipmi::Cmd kCmdMdrGetStatus    = 0x3D;
+constexpr ipmi::Cmd kCmdMdrWriteBegin   = 0x51;
+constexpr ipmi::Cmd kCmdMdrWriteChunk   = 0x52;
+constexpr ipmi::Cmd kCmdMdrWriteEnd     = 0x53;
+constexpr ipmi::Cmd kCmdMdrRegionStatus = 0x71;
+constexpr ipmi::Cmd kCmdMdrGetBlock     = 0x72;
 
-// Fixed agent ID for the BIOS SMBIOS agent (matches intel-ipmi-oem)
-static constexpr uint16_t smbiosAgentId     = 0x0101;
-static constexpr uint8_t  mdr2Version       = 2;
-static constexpr uint8_t  smbiosAgentVersion = 1;
-static constexpr size_t   dataInfoSize       = 16;
+constexpr ipmi::Cmd kCmdAmiGetStatus    = 0xF3;
+constexpr ipmi::Cmd kCmdAmiSetBiosInfo  = 0xB2;
+constexpr ipmi::Cmd kCmdAmiSetMdrPos    = 0xA0;
+constexpr ipmi::Cmd kCmdAmiGetMdrStatus = 0xA1;
+constexpr ipmi::Cmd kCmdAmiSetChunk     = 0xB5;
 
-// Completion code used when a shared-memory checksum is invalid
-static constexpr ipmi::Cc ccOemInvalidChecksum = 0x85;
+constexpr uint8_t kRegionSmbios = 0;
+constexpr uint8_t kRegionMeta   = 1;
 
-// -----------------------------------------------------------------------
-// Forward declaration
-// -----------------------------------------------------------------------
+// ── MDR V2 write-machine state ────────────────────────────────────────────────
 
-static void registerMDR2Functions() __attribute__((constructor));
+enum class MdrWriteState : uint8_t { Idle, Open, Receiving };
+static MdrWriteState g_mdrState        = MdrWriteState::Idle;
+static uint32_t      g_mdrDeclaredSize = 0;
+static std::vector<uint8_t> g_mdrBuf;
 
-// -----------------------------------------------------------------------
-// Helper: resolve the D-Bus service name for mdrv2
-// -----------------------------------------------------------------------
+// ── 0xB5 SetSmbiosChunk slot table ───────────────────────────────────────────
+//
+// The BIOS sends strings in order, cycling through this table. Each 0xB5 call
+// auto-advances g_amiCallIndex so the next call targets the next slot.
 
-static std::string getMdrv2Service()
+struct StringSlot
 {
-    auto dbus = getSdBus();
-    return ipmi::getService(*dbus, mdrv2Interface, mdrv2Path);
-}
-
-// -----------------------------------------------------------------------
-// 1. AgentStatus (0x30) — BIOS queries BMC MDR2 agent / directory version
-//
-// Request:  agentId (uint16_t), dirVersion (uint8_t)
-// Response: mdrVersion, agentVersion, dirVersion, dirEntries, dataRequest
-// -----------------------------------------------------------------------
-
-ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t, uint8_t>
-    mdr2AgentStatus(uint16_t agentId, uint8_t /*dirVersion*/)
-{
-    if (agentId != smbiosAgentId)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2AgentStatus: unknown agent id",
-            phosphor::logging::entry("ID=0x%04x", agentId));
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Read DirectoryEntries property
-    uint8_t dirEntries = 0;
-    try
-    {
-        ipmi::Value v = ipmi::getDbusProperty(*dbus, service, mdrv2Path,
-                                               mdrv2Interface,
-                                               "DirectoryEntries");
-        dirEntries = std::get<uint8_t>(v);
-    }
-    catch (const std::exception& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2AgentStatus: DirectoryEntries read failed",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-        return ipmi::responseResponseError();
-    }
-
-    // Always request the directory – the BIOS will decide whether to send it
-    static constexpr uint8_t dirDataRequested    = 1;
-    static constexpr uint8_t dirDataNotRequested = 0;
-    uint8_t dataRequest = (dirEntries == 0) ? dirDataRequested
-                                            : dirDataNotRequested;
-
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [1/9] AgentStatus",
-        phosphor::logging::entry("DIR_ENTRIES=%u", dirEntries),
-        phosphor::logging::entry("DATA_REQUESTED=%u", dataRequest));
-    return ipmi::responseSuccess(mdr2Version, smbiosAgentVersion,
-                                 static_cast<uint8_t>(0), dirEntries,
-                                 dataRequest);
-}
-
-// -----------------------------------------------------------------------
-// 2. GetDir (0x31) — BMC returns directory entries
-//
-// Request:  agentId (uint16_t), dirIndex (uint8_t)
-// Response: vector<uint8_t>
-// -----------------------------------------------------------------------
-
-ipmi::RspType<std::vector<uint8_t>>
-    mdr2GetDir(uint16_t agentId, uint8_t dirIndex)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    sdbusplus::message_t method = dbus->new_method_call(
-        service.c_str(), mdrv2Path, mdrv2Interface, "GetDirectoryInformation");
-    method.append(dirIndex);
-
-    std::vector<uint8_t> dataOut;
-    try
-    {
-        sdbusplus::message_t reply = dbus->call(method);
-        reply.read(dataOut);
-    }
-    catch (const sdbusplus::exception_t& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2GetDir: GetDirectoryInformation failed",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-        return ipmi::responseResponseError();
-    }
-
-    if (dataOut.empty())
-    {
-        return ipmi::responseResponseError();
-    }
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "MDR2 [2/9] GetDir",
-        phosphor::logging::entry("DIR_INDEX=%u", dirIndex),
-        phosphor::logging::entry("RESPONSE_BYTES=%zu", dataOut.size()));
-    return ipmi::responseSuccess(dataOut);
-}
-
-// -----------------------------------------------------------------------
-// 3. GetDataInfo (0x32) — BMC returns data-set metadata
-//
-// The BIOS calls this to check whether the BMC already has up-to-date
-// SMBIOS data for a given data-set ID (16-byte identifier).  The BMC
-// responds with the data-set's validity flag, current size, data version,
-// and timestamp so the BIOS can decide whether to re-send.
-//
-// Request:  agentId (uint16_t), dataInfo[16] (vector<uint8_t>)
-// Response: vector<uint8_t>
-//   [0]    mdrVersion
-//   [1-16] dataInfo (echo)
-//   [17]   validFlag  (0=invalid, 1=valid, 2=locked)
-//   [18-21] dataSetSize (uint32_t, big-endian as packed by smbios-mdr)
-//   [22]   dataVersion
-//   [23-26] timestamp (uint32_t, big-endian)
-// -----------------------------------------------------------------------
-
-ipmi::RspType<std::vector<uint8_t>>
-    mdr2GetDataInfo(uint16_t agentId, std::vector<uint8_t> dataInfo)
-{
-    constexpr size_t reqDataInfoSize = 16;
-    if (dataInfo.size() < reqDataInfoSize)
-    {
-        return ipmi::responseReqDataLenInvalid();
-    }
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Step 1: resolve the 16-byte ID to a directory index
-    int idIndex = -1;
-    {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface, "FindIdIndex");
-        method.append(dataInfo);
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(idIndex);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            phosphor::logging::log<phosphor::logging::level::ERR>(
-                "mdr2GetDataInfo: FindIdIndex failed",
-                phosphor::logging::entry("ERROR=%s", e.what()));
-            return ipmi::responseParmOutOfRange();
-        }
-    }
-    if (idIndex < 0)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2GetDataInfo: invalid data ID index",
-            phosphor::logging::entry("IDINDEX=%d", idIndex));
-        return ipmi::responseParmOutOfRange();
-    }
-
-    // Step 2: call GetDataInformation with the resolved index
-    std::vector<uint8_t> res;
-    {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface, "GetDataInformation");
-        method.append(static_cast<uint8_t>(idIndex));
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(res);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            phosphor::logging::log<phosphor::logging::level::ERR>(
-                "mdr2GetDataInfo: GetDataInformation failed",
-                phosphor::logging::entry("ERROR=%s", e.what()));
-            return ipmi::responseResponseError();
-        }
-    }
-
-    if (res.empty())
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2GetDataInfo: empty response from GetDataInformation");
-        return ipmi::responseResponseError();
-    }
-
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "MDR2 [3/9] GetDataInfo",
-        phosphor::logging::entry("ID_INDEX=%d", idIndex));
-    return ipmi::responseSuccess(res);
-}
-
-// -----------------------------------------------------------------------
-// 4. DataInfoOffer (0x39) — BMC offers a free data-set slot to the BIOS
-//
-// Request:  agentId (uint16_t)
-// Response: vector<uint8_t> (16-byte data set ID)
-// -----------------------------------------------------------------------
-
-ipmi::RspType<std::vector<uint8_t>>
-    mdr2DataInfoOffer(uint16_t agentId)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    sdbusplus::message_t method = dbus->new_method_call(
-        service.c_str(), mdrv2Path, mdrv2Interface, "GetDataOffer");
-
-    std::vector<uint8_t> dataOut;
-    try
-    {
-        sdbusplus::message_t reply = dbus->call(method);
-        reply.read(dataOut);
-    }
-    catch (const sdbusplus::exception_t& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2DataInfoOffer: GetDataOffer failed",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-        return ipmi::responseResponseError();
-    }
-
-    if (dataOut.size() != dataInfoSize)
-    {
-        return ipmi::responseUnspecifiedError();
-    }
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "MDR2 [4/9] DataInfoOffer: slot offered");
-    return ipmi::responseSuccess(dataOut);
-}
-
-// -----------------------------------------------------------------------
-// 5. SendDir (0x38) — BIOS sends directory metadata to the BMC
-//
-// Request:  agentId, dirVersion, dirIndex, returnedEntries,
-//           remainingEntries, dataInfo[]
-// Response: bool terminate
-// -----------------------------------------------------------------------
-
-ipmi::RspType<bool>
-    mdr2SendDir(uint16_t agentId, uint8_t dirVersion, uint8_t dirIndex,
-                uint8_t returnedEntries, uint8_t remainingEntries,
-                std::vector<uint8_t> dataInfo)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-    if ((static_cast<size_t>(returnedEntries) * dataInfoSize) !=
-        dataInfo.size())
-    {
-        return ipmi::responseReqDataLenInvalid();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    sdbusplus::message_t method = dbus->new_method_call(
-        service.c_str(), mdrv2Path, mdrv2Interface, "SendDirectoryInformation");
-    method.append(dirVersion, dirIndex, returnedEntries, remainingEntries,
-                  dataInfo);
-
-    bool terminate = false;
-    try
-    {
-        sdbusplus::message_t reply = dbus->call(method);
-        reply.read(terminate);
-    }
-    catch (const sdbusplus::exception_t& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2SendDir: SendDirectoryInformation failed",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-        return ipmi::responseResponseError();
-    }
-
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [5/9] SendDir",
-        phosphor::logging::entry("DIR_VERSION=%u", dirVersion),
-        phosphor::logging::entry("ENTRIES=%u", returnedEntries),
-        phosphor::logging::entry("TERMINATE=%d", static_cast<int>(terminate)));
-    return ipmi::responseSuccess(terminate);
-}
-
-// -----------------------------------------------------------------------
-// 6. SendDataInfo (0x3A) — BIOS declares size/version/timestamp
-//
-// Request:  agentId, dataInfo[16], validFlag, dataLength, dataVersion,
-//           timeStamp
-// Response: bool entryChanged
-// -----------------------------------------------------------------------
-
-ipmi::RspType<bool>
-    mdr2SendDataInfo(uint16_t agentId,
-                     std::array<uint8_t, dataInfoSize> dataInfo,
-                     uint8_t validFlag, uint32_t dataLength,
-                     uint32_t dataVersion, uint32_t timeStamp)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Resolve data-set index
-    std::vector<uint8_t> dataInfoVec(dataInfo.begin(), dataInfo.end());
-    int idIndex = -1;
-    {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface, "FindIdIndex");
-        method.append(dataInfoVec);
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(idIndex);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            return ipmi::responseParmOutOfRange();
-        }
-    }
-    if (idIndex < 0)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    sdbusplus::message_t method = dbus->new_method_call(
-        service.c_str(), mdrv2Path, mdrv2Interface, "SendDataInformation");
-    method.append(static_cast<uint8_t>(idIndex), validFlag, dataLength,
-                  dataVersion, timeStamp);
-
-    bool entryChanged = false;
-    try
-    {
-        sdbusplus::message_t reply = dbus->call(method);
-        reply.read(entryChanged);
-    }
-    catch (const sdbusplus::exception_t& e)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2SendDataInfo: SendDataInformation failed",
-            phosphor::logging::entry("ERROR=%s", e.what()));
-        return ipmi::responseResponseError();
-    }
-
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [6/9] SendDataInfo",
-        phosphor::logging::entry("DATA_LENGTH=%u", dataLength),
-        phosphor::logging::entry("DATA_VERSION=%u", dataVersion),
-        phosphor::logging::entry("ENTRY_CHANGED=%d",
-                                  static_cast<int>(entryChanged)));
-    return ipmi::responseSuccess(entryChanged);
-}
-
-// -----------------------------------------------------------------------
-// 7. LockData (0x33) — BIOS acquires exclusive write lock
-//
-// Request:  agentId, dataInfo[16], timeout (uint16_t, ms)
-// Response: mdr2Version, session, dataLength, xferAddress, xferLength
-// -----------------------------------------------------------------------
-
-ipmi::RspType<uint8_t, uint16_t, uint32_t, uint32_t, uint32_t>
-    mdr2LockData(uint16_t agentId,
-                 std::array<uint8_t, dataInfoSize> dataInfo,
-                 uint16_t timeout)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Resolve index
-    std::vector<uint8_t> dataInfoVec(dataInfo.begin(), dataInfo.end());
-    int idIndex = -1;
-    {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface, "FindIdIndex");
-        method.append(dataInfoVec);
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(idIndex);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            return ipmi::responseParmOutOfRange();
-        }
-    }
-    if (idIndex < 0)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    // SynchronizeDirectoryCommonData returns {dataSetSize, dataVersion, timestamp}
-    // and sets up the shared memory lock timeout.
-    std::vector<uint32_t> commonData;
-    {
-        sdbusplus::message_t method =
-            dbus->new_method_call(service.c_str(), mdrv2Path, mdrv2Interface,
-                                  "SynchronizeDirectoryCommonData");
-        method.append(static_cast<uint8_t>(idIndex),
-                      static_cast<uint32_t>(0));
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(commonData);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            phosphor::logging::log<phosphor::logging::level::ERR>(
-                "mdr2LockData: SynchronizeDirectoryCommonData failed",
-                phosphor::logging::entry("ERROR=%s", e.what()));
-            return ipmi::responseResponseError();
-        }
-    }
-
-    if (commonData.size() < 3)
-    {
-        return ipmi::responseResponseError();
-    }
-
-    // Return a synthetic session handle and placeholder xfer addresses.
-    // The actual shared-memory DMA address is platform-specific; the BIOS
-    // writes via SendDataBlock which copies into the D-Bus service buffer.
-    static uint16_t sessionHandle = 1;
-    uint16_t session = sessionHandle++;
-    if (sessionHandle == 0)
-    {
-        sessionHandle = 1;
-    }
-
-    // xferAddress and xferLength of 0 signal that the BIOS must use the
-    // SendDataBlock IPMI path rather than direct memory writes.
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [7/9] LockData",
-        phosphor::logging::entry("SESSION=%u", session),
-        phosphor::logging::entry("DATA_SET_SIZE=%u", commonData[0]));
-    return ipmi::responseSuccess(mdr2Version, session,
-                                 commonData[0], // dataSetSize
-                                 static_cast<uint32_t>(0), // xferAddress
-                                 static_cast<uint32_t>(0)); // xferLength
-}
-
-// -----------------------------------------------------------------------
-// 8. UnlockData (0x34) — BIOS releases the write lock
-//
-// Request:  agentId (uint16_t), lockHandle (uint16_t)
-// Response: (none beyond CC)
-// -----------------------------------------------------------------------
-
-ipmi::RspType<>
-    mdr2UnlockData(uint16_t agentId, uint16_t /*lockHandle*/)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-    // Lock state is managed by smbios-mdr; no explicit unlock call
-    // needed on the D-Bus side for the IPMI path.
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "MDR2 [8/9] UnlockData: lock released");
-    return ipmi::responseSuccess();
-}
-
-// -----------------------------------------------------------------------
-// 9. DataStart (0x3B) — BIOS opens a new SMBIOS transfer session
-//
-// Request:  agentId, dataInfo[16], dataLength, xferAddress, xferLength,
-//           timeout
-// Response: xferStartAck (uint8_t), session (uint16_t)
-// -----------------------------------------------------------------------
-
-ipmi::RspType<uint8_t, uint16_t>
-    cmd_mdr2_data_start(uint16_t agentId,
-                        std::array<uint8_t, dataInfoSize> dataInfo,
-                        uint32_t dataLength,
-                        uint32_t /*xferAddress*/,
-                        uint32_t /*xferLength*/,
-                        uint16_t /*timeout*/)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Resolve index
-    std::vector<uint8_t> dataInfoVec(dataInfo.begin(), dataInfo.end());
-    int idIndex = -1;
-    {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface, "FindIdIndex");
-        method.append(dataInfoVec);
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(idIndex);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            return ipmi::responseParmOutOfRange();
-        }
-    }
-    if (idIndex < 0)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    // Inform the smbios-mdr service of the expected data size
-    std::vector<uint32_t> commonData;
-    {
-        sdbusplus::message_t method =
-            dbus->new_method_call(service.c_str(), mdrv2Path, mdrv2Interface,
-                                  "SynchronizeDirectoryCommonData");
-        method.append(static_cast<uint8_t>(idIndex), dataLength);
-        try
-        {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(commonData);
-        }
-        catch (const sdbusplus::exception_t& e)
-        {
-            phosphor::logging::log<phosphor::logging::level::ERR>(
-                "cmd_mdr2_data_start: SynchronizeDirectoryCommonData failed",
-                phosphor::logging::entry("ERROR=%s", e.what()));
-            return ipmi::responseResponseError();
-        }
-    }
-
-    static uint16_t sessionHandle = 1;
-    uint16_t session = sessionHandle++;
-    if (sessionHandle == 0)
-    {
-        sessionHandle = 1;
-    }
-
-    static constexpr uint8_t xferStartAck = 1;
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [9/9-prep] DataStart",
-        phosphor::logging::entry("DATA_LENGTH=%u", dataLength),
-        phosphor::logging::entry("SESSION=%u", session));
-    return ipmi::responseSuccess(xferStartAck, session);
-}
-
-// -----------------------------------------------------------------------
-// 10. SendDataBlock (0x3D) — BIOS writes one SMBIOS chunk via IPMI
-//
-// Because LockData/DataStart return xferAddress=0, the BIOS must use
-// this command to transmit each chunk.  Chunks are accumulated in a
-// session buffer (keyed by lockHandle) and flushed when DataDone is
-// received.
-//
-// Request:  agentId, lockHandle, xferOffset, xferLength, checksum,
-//           data[xferLength]
-// Response: (none beyond CC)
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
-// Persistent SMBIOS file — written by cmd_mdr2_data_done so that
-// smbiosmdrv2app can parse the table when AgentSynchronizeData() fires.
-//
-// Layout matches phosphor-smbios-mdr MDRSMBIOSHeader (packed, 9 bytes):
-//   dirVer    = mdrDirVersion = 1
-//   mdrType   = mdrTypeII     = 2
-//   timestamp = seconds-since-epoch at time of transfer
-//   dataSize  = raw SMBIOS table byte count
-// followed immediately by the raw SMBIOS binary.
-// -----------------------------------------------------------------------
-
-static constexpr uint8_t     smbiosDirVer   = 1;
-static constexpr uint8_t     smbiosMdrType  = 2;
-static constexpr const char* smbiosDataFile = "/var/lib/smbios/smbios2";
-
-#pragma pack(push, 1)
-struct SmbiosMdrFileHeader
-{
-    uint8_t  dirVer;
-    uint8_t  mdrType;
-    uint32_t timestamp;
-    uint32_t dataSize;
+    uint8_t     smbiosType;
+    uint8_t     stringIndex; // 1-based within the structure's string area
+    const char* label;
 };
-#pragma pack(pop)
+constexpr StringSlot kAmiSlotTable[] = {
+    {1, 1, "Type1.SystemManufacturer"},
+    {1, 2, "Type1.SystemProductName"},
+    {2, 1, "Type2.BoardManufacturer"},
+    {2, 2, "Type2.BoardProductName"},
+};
+constexpr size_t kNumAmiSlots =
+    sizeof(kAmiSlotTable) / sizeof(kAmiSlotTable[0]);
+static size_t g_amiCallIndex = 0;
 
-static bool writeSmbiosFile(const std::vector<uint8_t>& blob)
+// In-memory working copy of the SMBIOS payload (no MDR or AMI header).
+// Seeded at load time from smbios2 then overlaid with FRU EEPROM data.
+static std::vector<uint8_t> g_amiBuf;
+
+// ── Forward declarations ──────────────────────────────────────────────────────
+
+static void registerAmiSmbiosHandlers() __attribute__((constructor));
+
+// ── SMBIOS structure navigation ───────────────────────────────────────────────
+
+// Return byte offset of the first structure of `type` in `buf`.
+// Skips the _SM3_ (24-byte) or _SM_ (31-byte) anchor at the head.
+// Returns SIZE_MAX if not found.
+static size_t findSmbiosStructOffset(const std::vector<uint8_t>& buf,
+                                     uint8_t type)
 {
-    std::error_code ec;
-    std::filesystem::create_directories(
-        std::filesystem::path(smbiosDataFile).parent_path(), ec);
-    if (ec)
+    size_t pos = 0;
+    if (buf.size() >= 5 && buf[0] == '_' && buf[1] == 'S' && buf[2] == 'M' &&
+        buf[3] == '3' && buf[4] == '_')
     {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "writeSmbiosFile: mkdir failed",
-            phosphor::logging::entry("ERROR=%s", ec.message().c_str()));
-        return false;
+        pos = 24;
     }
+    else if (buf.size() >= 4 && buf[0] == '_' && buf[1] == 'S' &&
+             buf[2] == 'M' && buf[3] == '_')
+    {
+        pos = 31;
+    }
+    while (pos + 4 <= buf.size())
+    {
+        uint8_t structType = buf[pos];
+        uint8_t structLen  = buf[pos + 1];
+        if (structLen < 4)
+            break;
+        if (structType == type)
+            return pos;
+        if (structType == 127)
+            break; // end-of-table marker
+        size_t end = pos + structLen;
+        while (end + 1 < buf.size() &&
+               !(buf[end] == 0 && buf[end + 1] == 0))
+        {
+            end++;
+        }
+        end += 2;
+        if (end > buf.size())
+            break;
+        pos = end;
+    }
+    return SIZE_MAX;
+}
 
-    SmbiosMdrFileHeader hdr{};
-    hdr.dirVer    = smbiosDirVer;
-    hdr.mdrType   = smbiosMdrType;
-    hdr.timestamp = static_cast<uint32_t>(std::time(nullptr));
-    hdr.dataSize  = static_cast<uint32_t>(blob.size());
+// Replace the `stringIndex`-th string (1-based) in the structure of `type`.
+// Resizes `buf` in place when the replacement differs in length.
+// Returns true on success.
+static bool replaceSmbiosString(std::vector<uint8_t>& buf, uint8_t type,
+                                 uint8_t stringIndex,
+                                 const std::string& newStr)
+{
+    if (stringIndex == 0)
+        return false;
+    size_t structOff = findSmbiosStructOffset(buf, type);
+    if (structOff == SIZE_MAX)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "replaceSmbiosString: struct type not found",
+            phosphor::logging::entry("TYPE=%u", type));
+        return false;
+    }
+    uint8_t structLen       = buf[structOff + 1];
+    size_t  stringAreaStart = structOff + structLen;
+    if (stringAreaStart > buf.size())
+        return false;
 
-    std::ofstream out(smbiosDataFile,
-                      std::ios_base::binary | std::ios_base::trunc);
-    if (!out.is_open())
+    size_t pos        = stringAreaStart;
+    size_t curIdx     = 1;
+    size_t targetStart = SIZE_MAX;
+    size_t targetEnd   = SIZE_MAX;
+
+    while (pos < buf.size())
     {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "writeSmbiosFile: cannot open file for writing",
-            phosphor::logging::entry("PATH=%s", smbiosDataFile));
-        return false;
+        if (buf[pos] == 0)
+        {
+            if (pos + 1 < buf.size() && buf[pos + 1] == 0 &&
+                pos == stringAreaStart)
+            {
+                phosphor::logging::log<phosphor::logging::level::WARNING>(
+                    "replaceSmbiosString: empty string area",
+                    phosphor::logging::entry("TYPE=%u", type));
+                return false;
+            }
+            if (curIdx == stringIndex)
+            {
+                targetEnd = pos;
+                break;
+            }
+            ++curIdx;
+            ++pos;
+            if (pos < buf.size() && buf[pos] == 0)
+            {
+                targetStart = pos;
+                targetEnd   = pos;
+                break;
+            }
+            if (curIdx == stringIndex)
+                targetStart = pos;
+            continue;
+        }
+        if (curIdx == stringIndex && targetStart == SIZE_MAX)
+            targetStart = pos;
+        ++pos;
     }
-    out.write(reinterpret_cast<const char*>(&hdr),
-              static_cast<std::streamsize>(sizeof(hdr)));
-    out.write(reinterpret_cast<const char*>(blob.data()),
-              static_cast<std::streamsize>(blob.size()));
-    out.close();
-    if (out.fail())
+    if (curIdx == stringIndex && targetStart != SIZE_MAX &&
+        targetEnd == SIZE_MAX)
     {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "writeSmbiosFile: write failed",
-            phosphor::logging::entry("PATH=%s", smbiosDataFile));
-        return false;
+        targetEnd = pos;
     }
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "writeSmbiosFile: SMBIOS table written",
-        phosphor::logging::entry("PATH=%s", smbiosDataFile),
-        phosphor::logging::entry("BYTES=%zu", blob.size()));
+    if (targetStart == SIZE_MAX || targetEnd == SIZE_MAX)
+        return false;
+
+    size_t oldLen = targetEnd - targetStart;
+    size_t newLen = newStr.size();
+    if (newLen == oldLen)
+    {
+        std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+    }
+    else if (newLen < oldLen)
+    {
+        std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+        buf.erase(buf.begin() + targetStart + newLen,
+                  buf.begin() + targetEnd);
+    }
+    else
+    {
+        size_t growBy = newLen - oldLen;
+        buf.insert(buf.begin() + targetEnd, growBy, 0);
+        std::memcpy(buf.data() + targetStart, newStr.data(), newLen);
+    }
     return true;
 }
 
-// Per-session accumulation buffer (indexed by session handle).
-// Only one active session is expected at a time.
-static std::vector<uint8_t> g_sessionBuffer;
-static uint16_t             g_activeSession = 0;
-
-ipmi::RspType<>
-    mdr2SendDataBlock(uint16_t agentId, uint16_t lockHandle,
-                      uint32_t xferOffset, uint32_t xferLength,
-                      uint32_t checksum,
-                      std::vector<uint8_t> data)
+// Read the string-index byte from `fieldOffset` within the structure's
+// formatted area; returns 0 if the structure or offset is not found.
+static uint8_t smbiosFieldStrIdx(const std::vector<uint8_t>& buf,
+                                  uint8_t type, size_t fieldOffset)
 {
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-    if (data.size() < xferLength)
-    {
-        return ipmi::responseReqDataLenInvalid();
-    }
-
-    // Verify CRC-32 (additive 32-bit sum, same as intel-ipmi-oem)
-    uint32_t calcChecksum = 0;
-    for (uint32_t i = 0; i < xferLength; ++i)
-    {
-        calcChecksum += data[i];
-    }
-    if (calcChecksum != checksum)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "mdr2SendDataBlock: checksum mismatch",
-            phosphor::logging::entry("EXPECTED=0x%08x", checksum),
-            phosphor::logging::entry("CALCULATED=0x%08x", calcChecksum));
-        return ipmi::response(ccOemInvalidChecksum);
-    }
-
-    // Initialise or extend the accumulation buffer
-    if (lockHandle != g_activeSession)
-    {
-        g_sessionBuffer.clear();
-        g_activeSession = lockHandle;
-        phosphor::logging::log<phosphor::logging::level::INFO>(
-            "MDR2 SendDataBlock: new transfer session",
-            phosphor::logging::entry("SESSION=%u", lockHandle));
-    }
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "MDR2 SendDataBlock",
-        phosphor::logging::entry("SESSION=%u", lockHandle),
-        phosphor::logging::entry("OFFSET=%u", xferOffset),
-        phosphor::logging::entry("LENGTH=%u", xferLength));
-    size_t needed = xferOffset + xferLength;
-    if (g_sessionBuffer.size() < needed)
-    {
-        g_sessionBuffer.resize(needed, 0);
-    }
-    std::copy(data.begin(), data.begin() + xferLength,
-              g_sessionBuffer.begin() + xferOffset);
-
-    return ipmi::responseSuccess();
+    size_t off = findSmbiosStructOffset(buf, type);
+    if (off == SIZE_MAX || off + fieldOffset >= buf.size())
+        return 0;
+    return buf[off + fieldOffset];
 }
 
-// -----------------------------------------------------------------------
-// 11. GetDataBlock (0x35) — BMC returns a stored data block (read path)
-//
-// Request:  agentId, lockHandle, xferOffset, xferLength
-// Response: xferLength, checksum, data[]
-// -----------------------------------------------------------------------
+// ── Working buffer management ─────────────────────────────────────────────────
 
-ipmi::RspType<uint32_t, uint32_t, std::vector<uint8_t>>
-    mdr2GetDataBlock(uint16_t agentId, uint16_t /*lockHandle*/,
-                     uint32_t xferOffset, uint32_t xferLength)
+static void loadWorkingBuffer()
 {
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-    if (g_sessionBuffer.empty() ||
-        xferOffset >= static_cast<uint32_t>(g_sessionBuffer.size()))
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    uint32_t available =
-        static_cast<uint32_t>(g_sessionBuffer.size()) - xferOffset;
-    uint32_t outSize = (xferLength > available) ? available : xferLength;
-
-    std::vector<uint8_t> out(g_sessionBuffer.begin() + xferOffset,
-                             g_sessionBuffer.begin() + xferOffset + outSize);
-
-    uint32_t calcChecksum = 0;
-    for (auto b : out)
-    {
-        calcChecksum += b;
-    }
-
-    return ipmi::responseSuccess(outSize, calcChecksum, out);
-}
-
-// -----------------------------------------------------------------------
-// 12. DataDone (0x3C) — BIOS signals transfer complete
-//
-// The BMC writes the accumulated buffer to persistent storage and calls
-// AgentSynchronizeData on the smbios-mdr D-Bus service, which triggers
-// SMBIOS parsing and publishes the results to D-Bus inventory.
-//
-// Request:  agentId (uint16_t), lockHandle (uint16_t)
-// Response: (none beyond CC)
-// -----------------------------------------------------------------------
-
-ipmi::RspType<>
-    cmd_mdr2_data_done(uint16_t agentId, uint16_t lockHandle)
-{
-    if (agentId != smbiosAgentId)
-    {
-        return ipmi::responseParmOutOfRange();
-    }
-
-    if (g_sessionBuffer.empty())
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "cmd_mdr2_data_done: no data in session buffer");
-        return ipmi::responseResponseError();
-    }
-
-    std::string service = getMdrv2Service();
-    auto dbus = getSdBus();
-
-    // Write the accumulated buffer to /var/lib/smbios/smbios2 with the
-    // MDRSMBIOSHeader prefix so that smbiosmdrv2app can parse it when
-    // AgentSynchronizeData() fires (mirrors smbiosPushWriteFile in the
-    // Redfish host-interface handler, ported here to the IPMI path per
-    // the intel-ipmi-oem ipmi_to_redfish_hooks.cpp side-effect pattern).
+    g_amiBuf = ami::loadMdrPayload();
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR2 [9/9] DataDone: flushing buffer",
-        phosphor::logging::entry("SESSION=%u", lockHandle),
-        phosphor::logging::entry("BYTES=%zu", g_sessionBuffer.size()));
-    if (!writeSmbiosFile(g_sessionBuffer))
-    {
-        return ipmi::responseResponseError();
-    }
+        "loadWorkingBuffer",
+        phosphor::logging::entry("BYTES=%zu", g_amiBuf.size()),
+        phosphor::logging::entry("PATH=%s", ami::kSmbiosFile));
+}
 
-    bool status = false;
+static void persistWorkingBuffer()
+{
+    if (g_amiBuf.empty())
     {
-        sdbusplus::message_t method = dbus->new_method_call(
-            service.c_str(), mdrv2Path, mdrv2Interface,
-            "AgentSynchronizeData");
-        try
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "persistWorkingBuffer: empty buffer — skipping");
+        return;
+    }
+    if (!ami::writeMdrFile(g_amiBuf.data(), g_amiBuf.size()))
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "persistWorkingBuffer: writeMdrFile failed");
+        return;
+    }
+    if (!ami::triggerMdrSync())
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "persistWorkingBuffer: file written but MDR sync failed");
+    }
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "persistWorkingBuffer: synced",
+        phosphor::logging::entry("BYTES=%zu", g_amiBuf.size()));
+}
+
+static void commitMdrBuffer()
+{
+    if (!g_mdrBuf.empty())
+    {
+        if (ami::persistAmiBuffer(g_mdrBuf.data(), g_mdrBuf.size()))
         {
-            sdbusplus::message_t reply = dbus->call(method);
-            reply.read(status);
+            ami::triggerMdrSync();
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "MDR V2 write committed",
+                phosphor::logging::entry("BYTES=%zu", g_mdrBuf.size()));
         }
-        catch (const sdbusplus::exception_t& e)
+        else
         {
             phosphor::logging::log<phosphor::logging::level::ERR>(
-                "cmd_mdr2_data_done: AgentSynchronizeData failed",
-                phosphor::logging::entry("ERROR=%s", e.what()));
-            return ipmi::responseResponseError();
+                "MDR V2 write commit failed");
+        }
+        g_mdrBuf.clear();
+    }
+    g_mdrState        = MdrWriteState::Idle;
+    g_mdrDeclaredSize = 0;
+}
+
+// ── FRU EEPROM → SMBIOS overlay ──────────────────────────────────────────────
+
+static constexpr const char* kFruEepromPath =
+    "/sys/bus/i2c/devices/7-0057/eeprom";
+
+// Advance past one IPMI FRU type/length-prefixed field. Returns the ASCII
+// string value (type 3 fields only); sets done=true on 0xC1 or overrun.
+static std::string fruNextField(const std::vector<uint8_t>& data,
+                                 size_t& pos, bool& done)
+{
+    if (pos >= data.size()) { done = true; return {}; }
+    uint8_t tl = data[pos++];
+    if (tl == 0xC1) { done = true; return {}; }
+    uint8_t type = (tl >> 6) & 0x03;
+    uint8_t len  = tl & 0x3F;
+    if (pos + len > data.size()) { done = true; return {}; }
+    std::string s;
+    if (type == 3 && len > 0)
+        s.assign(reinterpret_cast<const char*>(data.data() + pos), len);
+    pos += len;
+    return s;
+}
+
+static void populateSmbiosFromFru()
+{
+    std::ifstream f(kFruEepromPath, std::ios::binary);
+    if (!f)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "populateSmbiosFromFru: cannot open FRU EEPROM",
+            phosphor::logging::entry("PATH=%s", kFruEepromPath));
+        return;
+    }
+    std::vector<uint8_t> fru(std::istreambuf_iterator<char>(f), {});
+    if (fru.size() < 8 || fru[0] != 0x01)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "populateSmbiosFromFru: invalid FRU header");
+        return;
+    }
+
+    // Board Area: version(1) len(1) lang(1) mfgdate(3), then fields
+    std::string boardMfr, boardProduct, boardSerial;
+    size_t boardOff = static_cast<size_t>(fru[3]) * 8;
+    if (boardOff + 6 < fru.size() && fru[boardOff] == 0x01)
+    {
+        size_t pos = boardOff + 6;
+        bool done  = false;
+        boardMfr     = fruNextField(fru, pos, done);
+        boardProduct = fruNextField(fru, pos, done);
+        boardSerial  = fruNextField(fru, pos, done);
+    }
+
+    // Product Area: version(1) len(1) lang(1), then fields; scan for UUID
+    std::string productSerial;
+    std::array<uint8_t, 16> uuid{};
+    bool haveUuid = false;
+    size_t productOff = static_cast<size_t>(fru[4]) * 8;
+    if (productOff + 3 < fru.size() && fru[productOff] == 0x01)
+    {
+        size_t areaLen = static_cast<size_t>(fru[productOff + 1]) * 8;
+        size_t areaEnd = std::min(productOff + areaLen, fru.size());
+        size_t pos     = productOff + 3;
+        bool done      = false;
+        fruNextField(fru, pos, done); // manufacturer
+        fruNextField(fru, pos, done); // product name
+        fruNextField(fru, pos, done); // part/model
+        fruNextField(fru, pos, done); // version
+        productSerial = fruNextField(fru, pos, done);
+        fruNextField(fru, pos, done); // asset tag
+        fruNextField(fru, pos, done); // fru file id
+        while (!done && pos < areaEnd)
+        {
+            std::string extra = fruNextField(fru, pos, done);
+            if (extra.size() == 32)
+            {
+                bool ok = true;
+                for (char c : extra)
+                    if (!std::isxdigit(static_cast<unsigned char>(c)))
+                        ok = false;
+                if (ok)
+                {
+                    for (int i = 0; i < 16; ++i)
+                    {
+                        char h[3] = {extra[i * 2], extra[i * 2 + 1], '\0'};
+                        uuid[i] = static_cast<uint8_t>(
+                            std::strtoul(h, nullptr, 16));
+                    }
+                    haveUuid = true;
+                }
+            }
         }
     }
 
-    if (!status)
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "populateSmbiosFromFru",
+        phosphor::logging::entry("BOARD_MFR=%s", boardMfr.c_str()),
+        phosphor::logging::entry("BOARD_PRODUCT=%s", boardProduct.c_str()),
+        phosphor::logging::entry("BOARD_SERIAL=%s", boardSerial.c_str()));
+
+    if (g_amiBuf.empty())
     {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "cmd_mdr2_data_done: AgentSynchronizeData returned false");
-        return ipmi::responseUnspecifiedError();
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "populateSmbiosFromFru: g_amiBuf empty — skipping overlay");
+        return;
     }
 
-    // Clear the accumulation buffer
-    g_sessionBuffer.clear();
-    g_activeSession = 0;
+    bool changed              = false;
+    const std::string& serial = productSerial.empty() ? boardSerial
+                                                       : productSerial;
+
+    // Type 2 (Baseboard): Manufacturer @ +4, Product @ +5, Serial @ +7
+    if (!boardMfr.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 4);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardMfr))
+            changed = true;
+    }
+    if (!boardProduct.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 5);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardProduct))
+            changed = true;
+    }
+    if (!boardSerial.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 2, 7);
+        if (idx && replaceSmbiosString(g_amiBuf, 2, idx, boardSerial))
+            changed = true;
+    }
+
+    // Type 1 (System): Manufacturer @ +4, Product @ +5, Serial @ +7
+    if (!boardMfr.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 4);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, boardMfr))
+            changed = true;
+    }
+    if (!boardProduct.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 5);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, boardProduct))
+            changed = true;
+    }
+    if (!serial.empty())
+    {
+        uint8_t idx = smbiosFieldStrIdx(g_amiBuf, 1, 7);
+        if (idx && replaceSmbiosString(g_amiBuf, 1, idx, serial))
+            changed = true;
+    }
+
+    // Type 1 UUID: 16 bytes at structure offset +8
+    if (haveUuid)
+    {
+        size_t  off  = findSmbiosStructOffset(g_amiBuf, 1);
+        uint8_t slen = (off != SIZE_MAX) ? g_amiBuf[off + 1] : 0;
+        if (off != SIZE_MAX && slen >= 24 && off + 24 <= g_amiBuf.size())
+        {
+            std::memcpy(g_amiBuf.data() + off + 8, uuid.data(), 16);
+            changed = true;
+        }
+    }
+
+    // Type 3 (System Enclosure / Chassis): Rack Mount + ASRockRack
+    {
+        size_t t3off = findSmbiosStructOffset(g_amiBuf, 3);
+        if (t3off != SIZE_MAX && t3off + 5 < g_amiBuf.size())
+        {
+            if (g_amiBuf[t3off + 5] != 0x11)
+            {
+                g_amiBuf[t3off + 5] = 0x11; // Rack Mount chassis type
+                changed = true;
+            }
+        }
+        uint8_t t3mfr = smbiosFieldStrIdx(g_amiBuf, 3, 4);
+        if (t3mfr && replaceSmbiosString(g_amiBuf, 3, t3mfr, "ASRockRack"))
+            changed = true;
+        if (!boardSerial.empty())
+        {
+            uint8_t t3ser = smbiosFieldStrIdx(g_amiBuf, 3, 7);
+            if (t3ser &&
+                replaceSmbiosString(g_amiBuf, 3, t3ser, boardSerial))
+                changed = true;
+        }
+    }
+
+    // Type 4 (Processor): AMD family byte 0x18, fix manufacturer + version
+    {
+        size_t t4off = findSmbiosStructOffset(g_amiBuf, 4);
+        if (t4off != SIZE_MAX && t4off + 6 < g_amiBuf.size())
+        {
+            if (g_amiBuf[t4off + 6] != 0x18)
+            {
+                g_amiBuf[t4off + 6] = 0x18; // AMD processor family
+                changed = true;
+            }
+        }
+        uint8_t t4mfr = smbiosFieldStrIdx(g_amiBuf, 4, 7);
+        if (t4mfr && replaceSmbiosString(g_amiBuf, 4, t4mfr,
+                                          "Advanced Micro Devices, Inc."))
+            changed = true;
+        uint8_t t4ver = smbiosFieldStrIdx(g_amiBuf, 4, 0x10);
+        if (t4ver &&
+            replaceSmbiosString(g_amiBuf, 4, t4ver, "AMD Processor"))
+            changed = true;
+    }
+
+    if (changed)
+    {
+        persistWorkingBuffer();
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "populateSmbiosFromFru: SMBIOS updated from FRU EEPROM");
+    }
+    else
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "populateSmbiosFromFru: no changes — strings may already match");
+    }
+}
+
+// ── AMI MDR V2 handlers ───────────────────────────────────────────────────────
+
+static ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t, uint8_t>
+hMdrAgentStatus(ipmi::Context::ptr)
+{
+    uint8_t dataInit = g_amiBuf.empty() ? 0x01 : 0x00;
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0x30 MdrAgentStatus",
+        phosphor::logging::entry("BUF_BYTES=%zu", g_amiBuf.size()),
+        phosphor::logging::entry("DATA_INIT=%u", dataInit));
+    return ipmi::responseSuccess(uint8_t{0x01}, uint8_t{0x01}, uint8_t{0x00},
+                                  uint8_t{0x01}, dataInit);
+}
+
+static ipmi::RspType<std::vector<uint8_t>>
+hMdrGetDir(ipmi::Context::ptr)
+{
+    auto     view  = ami::amiViewFromCache();
+    uint16_t size  = static_cast<uint16_t>(view.size());
+    uint16_t chk   = ami::computeChecksum(view.data(), view.size());
+    bool     valid = !view.empty();
+
+    std::vector<uint8_t> rsp(3 + 16 + 16, 0);
+    rsp[0] = 0x01;
+    rsp[1] = 0x02;
+    rsp[2] = 0x00;
+
+    auto writeEntry = [](uint8_t* out, uint8_t regionId, bool isValid,
+                         uint16_t sz, uint16_t maxSz, uint8_t checksum) {
+        out[0] = regionId;
+        out[1] = isValid ? 0x01 : 0x00;
+        out[2] = sz & 0xFF;
+        out[3] = (sz >> 8) & 0xFF;
+        out[4] = sz & 0xFF;
+        out[5] = (sz >> 8) & 0xFF;
+        out[6] = maxSz & 0xFF;
+        out[7] = (maxSz >> 8) & 0xFF;
+        out[8] = checksum;
+    };
+    writeEntry(rsp.data() + 3, kRegionSmbios, valid, size, 0xFFFF,
+               static_cast<uint8_t>(chk & 0xFF));
+    writeEntry(rsp.data() + 3 + 16, kRegionMeta, true,
+               sizeof(ami::AmiMdrHeader), sizeof(ami::AmiMdrHeader), 0);
 
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "cmd_mdr2_data_done: SMBIOS transfer complete, inventory updated");
+        "AMI 0x31 MdrGetDir",
+        phosphor::logging::entry("VIEW_BYTES=%zu", view.size()));
+    return ipmi::responseSuccess(rsp);
+}
 
+static ipmi::RspType<uint8_t, uint8_t, uint8_t, uint8_t>
+hMdrGetStatus(ipmi::Context::ptr)
+{
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0x3D MdrGetStatus");
+    return ipmi::responseSuccess(uint8_t{0x00}, uint8_t{0x00},
+                                  uint8_t{0x10}, uint8_t{0x01});
+}
+
+static ipmi::RspType<>
+hMdrWriteBegin(ipmi::Context::ptr, uint8_t regionId, uint16_t declaredSize)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0x51 MdrWriteBegin",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("DECLARED=%u", declaredSize));
+    g_mdrBuf.clear();
+    g_mdrBuf.reserve(declaredSize);
+    g_mdrDeclaredSize = declaredSize;
+    g_mdrState        = MdrWriteState::Open;
     return ipmi::responseSuccess();
 }
 
-// -----------------------------------------------------------------------
-// Handler registration (NetFn 0x3E / netFnOemEight)
-// -----------------------------------------------------------------------
+static ipmi::RspType<>
+hMdrWriteChunk(ipmi::Context::ptr, uint8_t regionId,
+               uint16_t offset, std::vector<uint8_t> payload)
+{
+    size_t needed = static_cast<size_t>(offset) + payload.size();
+    if (needed > ami::kMaxPayload + sizeof(ami::AmiMdrHeader))
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "AMI 0x52 MdrWriteChunk: oversized",
+            phosphor::logging::entry("NEEDED=%zu", needed));
+        return ipmi::responseReqDataLenInvalid();
+    }
+    if (needed > g_mdrBuf.size())
+        g_mdrBuf.resize(needed, 0);
+    std::copy(payload.begin(), payload.end(), g_mdrBuf.begin() + offset);
+    g_mdrState = MdrWriteState::Receiving;
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0x52 MdrWriteChunk",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("OFFSET=%u", offset),
+        phosphor::logging::entry("LEN=%zu", payload.size()));
+    return ipmi::responseSuccess();
+}
 
-static void registerMDR2Functions()
+static ipmi::RspType<>
+hMdrWriteEnd(ipmi::Context::ptr)
 {
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "ASRock MDR2 SMBIOS handlers registered");
+        "AMI 0x53 MdrWriteEnd",
+        phosphor::logging::entry("BUF_BYTES=%zu", g_mdrBuf.size()),
+        phosphor::logging::entry("DECLARED=%u", g_mdrDeclaredSize));
+    commitMdrBuffer();
+    return ipmi::responseSuccess();
+}
 
-    // <AgentStatus>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIAgentStatus),
-        ipmi::Privilege::Operator, mdr2AgentStatus);
+static ipmi::RspType<std::vector<uint8_t>>
+hMdrRegionStatus(ipmi::Context::ptr, uint8_t regionId)
+{
+    auto     view  = ami::amiViewFromCache();
+    bool     valid = !view.empty();
+    uint16_t size  = valid ? static_cast<uint16_t>(view.size()) : 0;
+    uint16_t chk   = valid ? ami::computeChecksum(view.data(), view.size()) : 0;
 
-    // <GetDir>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDir),
-        ipmi::Privilege::Operator, mdr2GetDir);
+    std::vector<uint8_t> rsp(10, 0);
+    rsp[0] = 0x01;
+    rsp[1] = regionId;
+    rsp[2] = valid ? 0x01 : 0x00;
+    rsp[3] = (g_mdrState != MdrWriteState::Idle) ? 0x01 : 0x00;
+    rsp[4] = 0x00;
+    rsp[5] = size & 0xFF;
+    rsp[6] = (size >> 8) & 0xFF;
+    rsp[7] = size & 0xFF;
+    rsp[8] = (size >> 8) & 0xFF;
+    rsp[9] = chk & 0xFF;
 
-    // <GetDataInfo>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDataInfo),
-        ipmi::Privilege::Operator, mdr2GetDataInfo);
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0x71 MdrRegionStatus",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("VALID=%u", valid));
+    return ipmi::responseSuccess(rsp);
+}
 
-    // <LockData>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIILockData),
-        ipmi::Privilege::Operator, mdr2LockData);
+static ipmi::RspType<std::vector<uint8_t>>
+hMdrGetBlock(ipmi::Context::ptr, uint8_t regionId, uint16_t offset)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0x72 MdrGetBlock",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("OFFSET=%u", offset));
 
-    // <UnlockData>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIUnlockData),
-        ipmi::Privilege::Operator, mdr2UnlockData);
+    if (regionId == kRegionSmbios)
+    {
+        if (offset >= g_amiBuf.size())
+            return ipmi::responseSuccess(std::vector<uint8_t>{});
+        return ipmi::responseSuccess(std::vector<uint8_t>(
+            g_amiBuf.begin() + offset, g_amiBuf.end()));
+    }
+    if (regionId == kRegionMeta)
+    {
+        ami::AmiMdrHeader hdr{};
+        hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
+        hdr.checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+        uint8_t hdrBytes[sizeof(hdr)];
+        std::memcpy(hdrBytes, &hdr, sizeof(hdr));
+        if (offset >= sizeof(hdrBytes))
+            return ipmi::responseSuccess(std::vector<uint8_t>{});
+        return ipmi::responseSuccess(std::vector<uint8_t>(
+            hdrBytes + offset, hdrBytes + sizeof(hdrBytes)));
+    }
+    return ipmi::responseSuccess(std::vector<uint8_t>{});
+}
 
-    // <GetDataBlock>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIGetDataBlock),
-        ipmi::Privilege::Operator, mdr2GetDataBlock);
+// ── AMI proprietary handlers ───────────────────────────────────────────────────
 
-    // <SendDir>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDir),
-        ipmi::Privilege::Operator, mdr2SendDir);
+static ipmi::RspType<>
+hAmiGetStatus(ipmi::Context::ptr)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xF3 GetStatus",
+        phosphor::logging::entry("BUF_BYTES=%zu", g_amiBuf.size()));
+    return ipmi::responseSuccess();
+}
 
-    // <SendDataInfoOffer>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataInfoOffer),
-        ipmi::Privilege::Operator, mdr2DataInfoOffer);
+// 0xA1 GetMdrStatus — BIOS reads current size + checksum of a region.
+// Response: [regionId:1, valid:1, dataSize:2 LE, checksum:2 LE]
+static ipmi::RspType<std::vector<uint8_t>>
+hAmiGetMdrStatus(ipmi::Context::ptr, std::vector<uint8_t> req)
+{
+    uint8_t  regionId = req.empty() ? 0 : req[0];
+    uint16_t dataSize = 0;
+    uint16_t checksum = 0;
+    uint8_t  valid    = 0;
 
-    // <SendDataInfo>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataInfo),
-        ipmi::Privilege::Operator, mdr2SendDataInfo);
+    if (regionId == kRegionSmbios)
+    {
+        dataSize = static_cast<uint16_t>(g_amiBuf.size());
+        checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+        valid    = g_amiBuf.empty() ? 0 : 1;
+    }
+    else if (regionId == kRegionMeta)
+    {
+        ami::AmiMdrHeader hdr{};
+        hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
+        hdr.checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+        dataSize     = sizeof(hdr);
+        uint8_t hdrBytes[sizeof(hdr)];
+        std::memcpy(hdrBytes, &hdr, sizeof(hdr));
+        checksum = ami::computeChecksum(hdrBytes, sizeof(hdrBytes));
+        valid    = 1;
+    }
 
-    // <DataStart>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIDataStart),
-        ipmi::Privilege::Operator, cmd_mdr2_data_start);
+    std::vector<uint8_t> rsp{
+        regionId,
+        valid,
+        static_cast<uint8_t>(dataSize & 0xFF),
+        static_cast<uint8_t>((dataSize >> 8) & 0xFF),
+        static_cast<uint8_t>(checksum & 0xFF),
+        static_cast<uint8_t>((checksum >> 8) & 0xFF),
+    };
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA1 GetMdrStatus",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("VALID=%u", valid),
+        phosphor::logging::entry("DATA_SIZE=%u", dataSize));
+    return ipmi::responseSuccess(rsp);
+}
 
-    // <DataDone>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIIDataDone),
-        ipmi::Privilege::Operator, cmd_mdr2_data_done);
+// 0xB2 SetBiosInfo — BIOS overlays its info into SMBIOS Type 0 at offset +4.
+static ipmi::RspType<>
+hAmiSetBiosInfo(ipmi::Context::ptr, std::vector<uint8_t> payload)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xB2 SetBiosInfo",
+        phosphor::logging::entry("BYTES=%zu", payload.size()));
 
-    // <SendDataBlock>
-    ipmi::registerHandler(
-        ipmi::prioOemBase, static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-        static_cast<ipmi::Cmd>(mdr::cmdMdrIISendDataBlock),
-        ipmi::Privilege::Operator, mdr2SendDataBlock);
+    if (payload.empty())
+        return ipmi::responseSuccess();
+
+    size_t type0Off = findSmbiosStructOffset(g_amiBuf, 0);
+    if (type0Off == SIZE_MAX)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "hAmiSetBiosInfo: Type 0 not found in working buffer");
+        return ipmi::responseSuccess();
+    }
+
+    size_t  fieldsOff  = type0Off + 4;
+    uint8_t structLen  = g_amiBuf[type0Off + 1];
+    size_t  maxOverlay = (structLen > 4) ? (structLen - 4) : 0;
+    size_t  overlayLen = std::min(payload.size(), maxOverlay);
+
+    if (overlayLen == 0 || fieldsOff + overlayLen > g_amiBuf.size())
+        return ipmi::responseSuccess();
+
+    std::copy(payload.begin(), payload.begin() + overlayLen,
+              g_amiBuf.begin() + fieldsOff);
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "hAmiSetBiosInfo: overlaid Type 0",
+        phosphor::logging::entry("BYTES=%zu", overlayLen));
+    persistWorkingBuffer();
+    return ipmi::responseSuccess();
+}
+
+// 0xA0 SetMdrPos — actually BackupBmcMacDxe in this BIOS RE.
+// Body = [LAN_channel:1][mac:6]. We accept and log it.
+static ipmi::RspType<>
+hAmiSetMdrPos(ipmi::Context::ptr, uint8_t region, uint16_t offset)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA0 SetMdrPos [BIOS: BackupBmcMacDxe LAN_channel + MAC bytes]",
+        phosphor::logging::entry("REGION=%u", region),
+        phosphor::logging::entry("OFFSET=0x%04X", offset));
+    return ipmi::responseSuccess();
+}
+
+// 0xB5 SetSmbiosChunk — wire format (from BIOS RE of SendInfoBmcIpmiDxe):
+//   [reserved:1=0x00][ASCII string...][NUL:1]
+// Each call auto-advances g_amiCallIndex to the next entry in kAmiSlotTable.
+// Returns 1 byte ack (0x01 = OK) to satisfy the BIOS transport's ResponseSize
+// check; returns 0x00 (without advancing) if string replacement fails.
+static ipmi::RspType<uint8_t>
+hAmiSetChunk(ipmi::Context::ptr, std::vector<uint8_t> raw)
+{
+    if (raw.empty())
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "AMI 0xB5 SetSmbiosChunk: empty body");
+        return ipmi::responseSuccess(uint8_t{0x00});
+    }
+    if (raw[0] != 0x00)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "AMI 0xB5 SetSmbiosChunk: reserved byte non-zero",
+            phosphor::logging::entry("BYTE=0x%02X", raw[0]));
+    }
+
+    // Strip leading reserved byte and trailing NUL
+    size_t startIdx = 1;
+    size_t endIdx   = raw.size();
+    if (endIdx > startIdx && raw[endIdx - 1] == 0x00)
+        endIdx--;
+    std::string str(raw.begin() + startIdx, raw.begin() + endIdx);
+
+    const StringSlot& target = kAmiSlotTable[g_amiCallIndex % kNumAmiSlots];
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xB5 SetSmbiosChunk",
+        phosphor::logging::entry("CALL_IDX=%zu", g_amiCallIndex),
+        phosphor::logging::entry("SLOT=%s", target.label),
+        phosphor::logging::entry("VALUE=%s", str.c_str()));
+
+    bool changed = replaceSmbiosString(g_amiBuf, target.smbiosType,
+                                        target.stringIndex, str);
+    if (!changed)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "AMI 0xB5: string replacement failed — slot index NOT advanced",
+            phosphor::logging::entry("SLOT=%s", target.label));
+        return ipmi::responseSuccess(uint8_t{0x00});
+    }
+
+    persistWorkingBuffer();
+    ++g_amiCallIndex;
+    return ipmi::responseSuccess(uint8_t{0x01});
+}
+
+// ── Registration ──────────────────────────────────────────────────────────────
+
+static void registerAmiSmbiosHandlers()
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI SMBIOS: seeding working buffer");
+    ami::seedFromBakedIfMissing();
+    loadWorkingBuffer();
+    populateSmbiosFromFru();
+
+    const auto nf = static_cast<ipmi::NetFn>(ipmi::netFnOemSix);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI SMBIOS: registering 13 handlers on NetFn 0x3A (prioOpenBmcBase)");
+
+    // MDR V2
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrAgentStatus,
+                          ipmi::Privilege::Admin, hMdrAgentStatus);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetDir,
+                          ipmi::Privilege::Admin, hMdrGetDir);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetStatus,
+                          ipmi::Privilege::Admin, hMdrGetStatus);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteBegin,
+                          ipmi::Privilege::Admin, hMdrWriteBegin);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteChunk,
+                          ipmi::Privilege::Admin, hMdrWriteChunk);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteEnd,
+                          ipmi::Privilege::Admin, hMdrWriteEnd);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrRegionStatus,
+                          ipmi::Privilege::Admin, hMdrRegionStatus);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetBlock,
+                          ipmi::Privilege::Admin, hMdrGetBlock);
+
+    // AMI proprietary
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiGetStatus,
+                          ipmi::Privilege::Admin, hAmiGetStatus);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetBiosInfo,
+                          ipmi::Privilege::Admin, hAmiSetBiosInfo);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiGetMdrStatus,
+                          ipmi::Privilege::Admin, hAmiGetMdrStatus);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetMdrPos,
+                          ipmi::Privilege::Admin, hAmiSetMdrPos);
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetChunk,
+                          ipmi::Privilege::Admin, hAmiSetChunk);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI SMBIOS: handlers ready");
 }
 
 } // namespace asrock

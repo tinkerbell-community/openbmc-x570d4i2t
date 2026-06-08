@@ -50,6 +50,7 @@ asrock_oem_deps = [
 # -----------------------------------------------------------------------
 
 asrockoemcmds_src = [
+    'src/amiconverter.cpp',
     'src/appcommands.cpp',
     'src/biosconfig.cpp',
     'src/chassiscommands.cpp',
