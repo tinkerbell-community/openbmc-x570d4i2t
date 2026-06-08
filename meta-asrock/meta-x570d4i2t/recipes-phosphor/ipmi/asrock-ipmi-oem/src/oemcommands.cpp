@@ -867,6 +867,10 @@ enum class OemMdrState : uint8_t { Idle, Open, Receiving };
 static OemMdrState          g_oemState       = OemMdrState::Idle;
 static uint32_t             g_oemDeclared    = 0;
 static std::vector<uint8_t> g_oemWriteBuf;
+// True only after the BIOS completes a WriteEnd with real SMBIOS data.
+// RegionStatus for region 0 returns valid=0 until this is set so the BIOS
+// always pushes a fresh SMBIOS table (not just meta updates).
+static bool                 g_hasBiosPushedSmbios = false;
 
 // ── Hex-dump helper (logs up to 64 bytes) ───────────────────────────────
 static std::string mdrHex(const std::vector<uint8_t>& v)
@@ -1073,6 +1077,7 @@ static ipmi::RspType<std::vector<uint8_t>>
         if (ami::persistAmiBuffer(g_oemWriteBuf.data(), g_oemWriteBuf.size()))
         {
             ami::triggerMdrSync();
+            g_hasBiosPushedSmbios = true;  // BIOS has successfully pushed SMBIOS
             phosphor::logging::log<phosphor::logging::level::INFO>(
                 "MDR 0x53 WriteEnd: committed to disk and synced",
                 phosphor::logging::entry("BYTES=%zu", g_oemWriteBuf.size()));
@@ -1122,7 +1127,10 @@ static ipmi::RspType<std::vector<uint8_t>>
                 "MDR 0x5D payload head",
                 phosphor::logging::entry("HEAD_HEX=%s", mdrHex(g_oemWriteBuf).c_str()));
             if (ami::persistAmiBuffer(g_oemWriteBuf.data(), g_oemWriteBuf.size()))
+            {
                 ami::triggerMdrSync();
+                g_hasBiosPushedSmbios = true;
+            }
             g_oemWriteBuf.clear();
         }
         g_oemState    = OemMdrState::Idle;
@@ -1146,9 +1154,15 @@ static ipmi::RspType<std::vector<uint8_t>>
         phosphor::logging::entry("STATE=%u", static_cast<uint8_t>(g_oemState)));
 
     auto cached = ami::loadMdrPayload();
-    bool valid   = !cached.empty();
-    uint16_t sz  = valid ? static_cast<uint16_t>(cached.size()) : 0;
-    uint16_t chk = valid ? ami::computeChecksum(cached.data(), cached.size()) : 0;
+    // Region 0 (SMBIOS table): only valid after BIOS completes a WriteEnd.
+    // FRU-derived data doesn't count — returning valid=0 forces the BIOS
+    // to push the full SMBIOS table rather than only sending meta updates.
+    // Region 1 (Anchor): always valid (synthesized 31-byte anchor).
+    bool valid = (regionId == kOemRegionSmbios)
+                     ? g_hasBiosPushedSmbios
+                     : true;
+    uint16_t sz  = (valid && !cached.empty()) ? static_cast<uint16_t>(cached.size()) : 0;
+    uint16_t chk = (valid && !cached.empty()) ? ami::computeChecksum(cached.data(), cached.size()) : 0;
 
     // [mdrVer, regionId, valid, lock, updateCnt, szLo, szHi, usedLo, usedHi, chkLo]
     std::vector<uint8_t> rsp(10, 0);
