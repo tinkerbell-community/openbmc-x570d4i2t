@@ -149,7 +149,7 @@
         },
 
         {
-            "_comment": "FanTach_CPU / FanTach_Chassis are published as constant 1500 RPM fan_tach virtual sensors by phosphor-virtual-sensor (see virtual_sensor_config.json) to satisfy swampd's 'fan' PID class, which ignores MissingIsAcceptable. They intentionally have no ExternalSensor stanza here so the two daemons don't both own /xyz/openbmc_project/sensors/fan_tach/FanTach_*.",
+            "_comment": "FanTach_CPU / FanTach_Chassis are published by phosphor-virtual-sensor (config-virtual-sensor.json) as dynamic RPM estimates derived from the current Pwm_1 / Pwm_2 duty cycle (Pwm * 36 → 0-3600 RPM at 100%). They intentionally have no ExternalSensor stanza here so the two daemons don't both own /xyz/openbmc_project/sensors/fan_tach/FanTach_*.",
             "Connector": {
                 "Name": "FAN1",
                 "Pwm": 0,
@@ -158,7 +158,10 @@
             "EntityId": 29,
             "EntityInstance": 1,
             "Index": 0,
+            "MaxReading": 3600,
+            "MinReading": 0,
             "Name": "FAN1",
+            "PowerState": "On",
             "Type": "AspeedFan"
         },
         {
@@ -170,7 +173,10 @@
             "EntityId": 29,
             "EntityInstance": 2,
             "Index": 1,
+            "MaxReading": 3600,
+            "MinReading": 0,
             "Name": "FAN2",
+            "PowerState": "On",
             "Type": "AspeedFan"
         },
         {
@@ -182,7 +188,10 @@
             "EntityId": 29,
             "EntityInstance": 3,
             "Index": 2,
+            "MaxReading": 3600,
+            "MinReading": 0,
             "Name": "FAN3",
+            "PowerState": "On",
             "Type": "AspeedFan"
         },
 

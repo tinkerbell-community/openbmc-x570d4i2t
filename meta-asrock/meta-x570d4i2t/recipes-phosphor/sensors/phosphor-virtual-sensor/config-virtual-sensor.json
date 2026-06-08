@@ -3,20 +3,40 @@
         "Desc": {
             "Name": "FanTach_CPU",
             "SensorType": "fan_tach",
-            "MaxValue": 25000.0,
+            "MaxValue": 3600.0,
             "MinValue": 0.0
         },
-        "Params": {},
-        "Expression": "1500"
+        "Params": {
+            "DbusParam": [
+                {
+                    "ParamName": "pwm1",
+                    "Desc": {
+                        "Name": "Pwm_1",
+                        "SensorType": "fan_pwm"
+                    }
+                }
+            ]
+        },
+        "Expression": "pwm1 * 36"
     },
     {
         "Desc": {
             "Name": "FanTach_Chassis",
             "SensorType": "fan_tach",
-            "MaxValue": 25000.0,
+            "MaxValue": 3600.0,
             "MinValue": 0.0
         },
-        "Params": {},
-        "Expression": "1500"
+        "Params": {
+            "DbusParam": [
+                {
+                    "ParamName": "pwm2",
+                    "Desc": {
+                        "Name": "Pwm_2",
+                        "SensorType": "fan_pwm"
+                    }
+                }
+            ]
+        },
+        "Expression": "pwm2 * 36"
     }
 ]
