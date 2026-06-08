@@ -187,15 +187,19 @@
         },
 
         {
-            "Address": "0x38",
-            "Bus": 2,
-            "Name": "PSU FRU",
-            "Type": "IPMI_FRU"
+            "Address": "0x4F",
+            "Bus": 4,
+            "Name": "Aux Temp",
+            "Thresholds": [
+                {"Direction": "greater than", "Name": "upper critical", "Severity": 1, "Value": 85},
+                {"Direction": "greater than", "Name": "upper non critical", "Severity": 0, "Value": 75}
+            ],
+            "Type": "NCT75"
         },
 
         {
             "Address": "0x70",
-            "Bus": 4,
+            "Bus": 0,
             "ChannelNames": [
                 "PCIE7 SMBus",
                 "M.2 Slot 1 (NVMe MI)",
