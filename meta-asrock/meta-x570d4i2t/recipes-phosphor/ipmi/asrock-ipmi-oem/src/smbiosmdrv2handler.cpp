@@ -862,39 +862,37 @@ static void registerAmiSmbiosHandlers()
     loadWorkingBuffer();
     populateSmbiosFromFru();
 
-    const auto nf = static_cast<ipmi::NetFn>(ipmi::netFnOemSix);
-
     phosphor::logging::log<phosphor::logging::level::INFO>(
         "AMI SMBIOS: registering 13 handlers on NetFn 0x3A (prioOpenBmcBase)");
 
     // MDR V2
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrAgentStatus,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrAgentStatus,
                           ipmi::Privilege::Admin, hMdrAgentStatus);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetDir,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrGetDir,
                           ipmi::Privilege::Admin, hMdrGetDir);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetStatus,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrGetStatus,
                           ipmi::Privilege::Admin, hMdrGetStatus);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteBegin,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrWriteBegin,
                           ipmi::Privilege::Admin, hMdrWriteBegin);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteChunk,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrWriteChunk,
                           ipmi::Privilege::Admin, hMdrWriteChunk);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrWriteEnd,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrWriteEnd,
                           ipmi::Privilege::Admin, hMdrWriteEnd);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrRegionStatus,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrRegionStatus,
                           ipmi::Privilege::Admin, hMdrRegionStatus);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdMdrGetBlock,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdMdrGetBlock,
                           ipmi::Privilege::Admin, hMdrGetBlock);
 
     // AMI proprietary
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiGetStatus,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdAmiGetStatus,
                           ipmi::Privilege::Admin, hAmiGetStatus);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetBiosInfo,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdAmiSetBiosInfo,
                           ipmi::Privilege::Admin, hAmiSetBiosInfo);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiGetMdrStatus,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdAmiGetMdrStatus,
                           ipmi::Privilege::Admin, hAmiGetMdrStatus);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetMdrPos,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdAmiSetMdrPos,
                           ipmi::Privilege::Admin, hAmiSetMdrPos);
-    ipmi::registerHandler(ipmi::prioOpenBmcBase, nf, kCmdAmiSetChunk,
+    ipmi::registerHandler(ipmi::prioOpenBmcBase, ipmi::netFnOemSix, kCmdAmiSetChunk,
                           ipmi::Privilege::Admin, hAmiSetChunk);
 
     phosphor::logging::log<phosphor::logging::level::INFO>(

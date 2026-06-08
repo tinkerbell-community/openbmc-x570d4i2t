@@ -140,9 +140,15 @@ ipmi::RspType<std::vector<uint8_t>>
 {
     uint8_t param = paramSel.value_or(0x00);
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetInventory (0xE6): handler entered",
+        phosphor::logging::entry("PARAM=0x%02X", param));
+
     // Device status: all zeroes = all online
     if (param == 0x04)
     {
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "GetInventory (0xE6): returning device status bitmap (32 zeros)");
         std::vector<uint8_t> devStatus(32, 0x00);
         return ipmi::responseSuccess(devStatus);
     }
@@ -153,52 +159,124 @@ ipmi::RspType<std::vector<uint8_t>>
     std::string serialNumber;
     std::string fwVersion;
 
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "GetInventory (0xE6): querying board info from D-Bus",
+        phosphor::logging::entry("OBJ=%s", boardObjPath));
     try
     {
-        auto dbus = getSdBus();
-        std::string svc = ipmi::getService(*dbus, itemBoardIntf, boardObjPath);
+        auto        dbus = getSdBus();
+        std::string svc  = ipmi::getService(*dbus, itemBoardIntf, boardObjPath);
+
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "GetInventory (0xE6): board service found",
+            phosphor::logging::entry("SVC=%s", svc.c_str()));
 
         auto tryProp = [&](const char* prop) -> std::string {
-            try {
-                ipmi::Value v = ipmi::getDbusProperty(
-                    *dbus, svc, boardObjPath, assetIntf, prop);
+            try
+            {
+                ipmi::Value v = ipmi::getDbusProperty(*dbus, svc, boardObjPath,
+                                                      assetIntf, prop);
                 return std::get<std::string>(v);
-            } catch (...) { return {}; }
+            }
+            catch (...)
+            {
+                return {};
+            }
         };
 
-        if (auto n = tryProp("Model"); !n.empty())    productName  = n;
-        if (auto m = tryProp("Manufacturer"); !m.empty()) manufacturer = m;
-        if (auto s = tryProp("SerialNumber"); !s.empty()) serialNumber = s;
+        if (auto n = tryProp("Model"); !n.empty())
+        {
+            productName = n;
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "GetInventory (0xE6): Model from D-Bus",
+                phosphor::logging::entry("VALUE=%s", n.c_str()));
+        }
+        if (auto m = tryProp("Manufacturer"); !m.empty())
+        {
+            manufacturer = m;
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "GetInventory (0xE6): Manufacturer from D-Bus",
+                phosphor::logging::entry("VALUE=%s", m.c_str()));
+        }
+        if (auto s = tryProp("SerialNumber"); !s.empty())
+        {
+            serialNumber = s;
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "GetInventory (0xE6): SerialNumber from D-Bus",
+                phosphor::logging::entry("VALUE=%s", s.c_str()));
+        }
     }
-    catch (...) {}
+    catch (const std::exception& e)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "GetInventory (0xE6): board D-Bus query failed, using defaults",
+            phosphor::logging::entry("ERROR=%s", e.what()));
+    }
 
     // Active BMC firmware version from xyz.openbmc_project.Software objects
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "GetInventory (0xE6): querying active BMC firmware version");
     try
     {
         auto dbus = getSdBus();
         using ObjTree = std::map<sdbusplus::message::object_path,
-            std::map<std::string, std::map<std::string, ipmi::Value>>>;
+                                 std::map<std::string,
+                                          std::map<std::string, ipmi::Value>>>;
         auto msg = dbus->new_method_call(
             "xyz.openbmc_project.ObjectMapper",
             "/xyz/openbmc_project/object_mapper",
             "xyz.openbmc_project.ObjectMapper", "GetSubTree");
         msg.append(softwareRoot, 0,
                    std::vector<std::string>{softwareIntf, activationIntf});
-        auto reply = dbus->call(msg);
+        auto    reply = dbus->call(msg);
         ObjTree objs;
         reply.read(objs);
+
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "GetInventory (0xE6): software entries found",
+            phosphor::logging::entry("COUNT=%zu", objs.size()));
+
         for (const auto& [path, ifaces] : objs)
         {
-            if (!ifaces.count(activationIntf)) continue;
+            if (!ifaces.count(activationIntf))
+                continue;
             auto it = ifaces.find(softwareIntf);
-            if (it == ifaces.end()) continue;
+            if (it == ifaces.end())
+                continue;
             auto vIt = it->second.find("Version");
-            if (vIt == it->second.end()) continue;
+            if (vIt == it->second.end())
+                continue;
             auto ver = std::get<std::string>(vIt->second);
-            if (!ver.empty()) { fwVersion = ver; break; }
+            if (!ver.empty())
+            {
+                fwVersion = ver;
+                phosphor::logging::log<phosphor::logging::level::INFO>(
+                    "GetInventory (0xE6): firmware version found",
+                    phosphor::logging::entry("PATH=%s",
+                                             std::string(path).c_str()),
+                    phosphor::logging::entry("VERSION=%s", ver.c_str()));
+                break;
+            }
+        }
+        if (fwVersion.empty())
+        {
+            phosphor::logging::log<phosphor::logging::level::WARNING>(
+                "GetInventory (0xE6): no active firmware version found");
         }
     }
-    catch (...) {}
+    catch (const std::exception& e)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "GetInventory (0xE6): software D-Bus query failed",
+            phosphor::logging::entry("ERROR=%s", e.what()));
+    }
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetInventory (0xE6): responding",
+        phosphor::logging::entry("PRODUCT=%s", productName.c_str()),
+        phosphor::logging::entry("MFR=%s", manufacturer.c_str()),
+        phosphor::logging::entry("SERIAL=%s", serialNumber.c_str()),
+        phosphor::logging::entry("FW=%s", fwVersion.c_str()));
 
     std::vector<uint8_t> resp;
     resp.reserve(129);
@@ -222,50 +300,60 @@ ipmi::RspType<std::vector<uint8_t>>
 // -----------------------------------------------------------------------
 
 ipmi::RspType<std::vector<uint8_t>>
-    ipmiGetSensorInfo(ipmi::Context::ptr& ctx, uint8_t startIndex)
+    ipmiGetSensorInfo(ipmi::Context::ptr& /*ctx*/, uint8_t startIndex)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetSensorInfo (0x1E): handler entered",
+        phosphor::logging::entry("START_INDEX=%u", startIndex),
+        phosphor::logging::entry("SENSOR_ROOT=%s", sensorRoot));
+
     std::vector<std::string> sensorNames;
 
     try
     {
         auto dbus = getSdBus();
-        // GetManagedObjects on the sensor namespace
-        using ObjectValueTree = std::map<sdbusplus::message::object_path,
-            std::map<std::string, std::map<std::string, ipmi::Value>>>;
-        auto msg = dbus->new_method_call(
+        auto msg  = dbus->new_method_call(
             "xyz.openbmc_project.ObjectMapper",
             "/xyz/openbmc_project/object_mapper",
-            "xyz.openbmc_project.ObjectMapper",
-            "GetSubTreePaths");
+            "xyz.openbmc_project.ObjectMapper", "GetSubTreePaths");
         msg.append(sensorRoot, 0, std::vector<std::string>{});
-        auto reply = dbus->call(msg);
+        auto                     reply = dbus->call(msg);
         std::vector<std::string> paths;
         reply.read(paths);
+
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "GetSensorInfo (0x1E): sensor paths found",
+            phosphor::logging::entry("TOTAL=%zu", paths.size()));
+
         for (const auto& p : paths)
         {
-            // Extract the last path component as the sensor name
             auto pos = p.rfind('/');
             if (pos != std::string::npos)
-            {
                 sensorNames.push_back(p.substr(pos + 1));
-            }
         }
     }
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::WARNING>(
-            "ipmiGetSensorInfo: D-Bus query failed",
+            "GetSensorInfo (0x1E): D-Bus query failed",
             phosphor::logging::entry("ERROR=%s", e.what()));
     }
 
-    // Page: return up to 20 names starting at startIndex
-    constexpr uint8_t pageSize = 20;
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "GetSensorInfo (0x1E): paging",
+        phosphor::logging::entry("TOTAL_SENSORS=%zu", sensorNames.size()),
+        phosphor::logging::entry("START_INDEX=%u", startIndex));
+
+    constexpr uint8_t   pageSize = 20;
     std::vector<uint8_t> resp;
 
     if (startIndex >= sensorNames.size())
     {
-        // Return count-only header indicating no entries at this offset
-        resp.push_back(0); // count = 0
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "GetSensorInfo (0x1E): start index past end — returning empty page",
+            phosphor::logging::entry("START_INDEX=%u", startIndex),
+            phosphor::logging::entry("TOTAL=%zu", sensorNames.size()));
+        resp.push_back(0);
         return ipmi::responseSuccess(resp);
     }
 
@@ -274,14 +362,23 @@ ipmi::RspType<std::vector<uint8_t>>
          i < sensorNames.size() && count < pageSize; ++i, ++count)
     {
         const auto& name = sensorNames[i];
-        uint8_t len = static_cast<uint8_t>(
+        uint8_t     len  = static_cast<uint8_t>(
             std::min(name.size(), static_cast<size_t>(0xFF)));
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "GetSensorInfo (0x1E): adding sensor",
+            phosphor::logging::entry("IDX=%zu", i),
+            phosphor::logging::entry("NAME=%s", name.c_str()),
+            phosphor::logging::entry("LEN=%u", len));
         resp.push_back(len);
         resp.insert(resp.end(), name.begin(), name.begin() + len);
     }
 
-    // Prepend count
     resp.insert(resp.begin(), count);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetSensorInfo (0x1E): responding",
+        phosphor::logging::entry("COUNT=%u", count),
+        phosphor::logging::entry("RESP_BYTES=%zu", resp.size()));
     return ipmi::responseSuccess(resp);
 }
 
@@ -296,64 +393,100 @@ ipmi::RspType<std::vector<uint8_t>>
 ipmi::RspType<std::vector<uint8_t>>
     ipmiGetFwVersion(ipmi::Context::ptr& /*ctx*/)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetFwVersion (0x20): handler entered",
+        phosphor::logging::entry("SOFTWARE_ROOT=%s", softwareRoot));
+
     std::string version = "unknown";
 
     try
     {
         auto dbus = getSdBus();
-        // Walk /xyz/openbmc_project/software for the active BMC image
-        auto msg = dbus->new_method_call(
+        auto msg  = dbus->new_method_call(
             "xyz.openbmc_project.ObjectMapper",
             "/xyz/openbmc_project/object_mapper",
-            "xyz.openbmc_project.ObjectMapper",
-            "GetSubTreePaths");
-        msg.append(softwareRoot, 0,
-                   std::vector<std::string>{softwareIntf});
-        auto reply = dbus->call(msg);
+            "xyz.openbmc_project.ObjectMapper", "GetSubTreePaths");
+        msg.append(softwareRoot, 0, std::vector<std::string>{softwareIntf});
+        auto                     reply = dbus->call(msg);
         std::vector<std::string> paths;
         reply.read(paths);
 
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "GetFwVersion (0x20): software paths found",
+            phosphor::logging::entry("COUNT=%zu", paths.size()));
+
         for (const auto& path : paths)
         {
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "GetFwVersion (0x20): checking path",
+                phosphor::logging::entry("PATH=%s", path.c_str()));
             try
             {
                 std::string svc = ipmi::getService(*dbus, softwareIntf, path);
-                // Only return the BMC's own active image
                 ipmi::Value actV = ipmi::getDbusProperty(
                     *dbus, svc, path, activationIntf, "Activation");
                 const auto& actStr = std::get<std::string>(actV);
+
+                phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                    "GetFwVersion (0x20): activation state",
+                    phosphor::logging::entry("PATH=%s", path.c_str()),
+                    phosphor::logging::entry("STATE=%s", actStr.c_str()));
+
                 if (actStr.find("Active") == std::string::npos)
                 {
+                    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                        "GetFwVersion (0x20): skipping non-active entry",
+                        phosphor::logging::entry("PATH=%s", path.c_str()));
                     continue;
                 }
                 ipmi::Value verV = ipmi::getDbusProperty(
                     *dbus, svc, path, softwareIntf, "Version");
                 version = std::get<std::string>(verV);
+                phosphor::logging::log<phosphor::logging::level::INFO>(
+                    "GetFwVersion (0x20): active version found",
+                    phosphor::logging::entry("PATH=%s", path.c_str()),
+                    phosphor::logging::entry("VERSION=%s", version.c_str()));
                 break;
             }
-            catch (...)
+            catch (const std::exception& e)
             {
+                phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                    "GetFwVersion (0x20): error on path",
+                    phosphor::logging::entry("PATH=%s", path.c_str()),
+                    phosphor::logging::entry("ERROR=%s", e.what()));
                 continue;
             }
+        }
+        if (version == "unknown")
+        {
+            phosphor::logging::log<phosphor::logging::level::WARNING>(
+                "GetFwVersion (0x20): no active version found, using 'unknown'");
         }
     }
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::WARNING>(
-            "ipmiGetFwVersion: D-Bus lookup failed",
+            "GetFwVersion (0x20): ObjectMapper query failed",
             phosphor::logging::entry("ERROR=%s", e.what()));
     }
 
-    // Pack as: major=0, minor=0, aux=0, then the version string with null
-    std::vector<uint8_t> resp;
-    resp.push_back(0); // major (parsed from string if needed)
-    resp.push_back(0); // minor
-    resp.push_back(0); // aux
-
     if (version.size() > 60)
     {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "GetFwVersion (0x20): version string truncated to 60 chars",
+            phosphor::logging::entry("ORIGINAL=%s", version.c_str()));
         version.resize(60);
     }
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetFwVersion (0x20): responding",
+        phosphor::logging::entry("VERSION=%s", version.c_str()),
+        phosphor::logging::entry("RESP_BYTES=%zu", 3 + version.size() + 1));
+
+    std::vector<uint8_t> resp;
+    resp.push_back(0); // major
+    resp.push_back(0); // minor
+    resp.push_back(0); // aux
     version.push_back('\0');
     resp.insert(resp.end(), version.begin(), version.end());
     return ipmi::responseSuccess(resp);
@@ -369,6 +502,9 @@ ipmi::RspType<std::vector<uint8_t>>
 
 ipmi::RspType<uint8_t> ipmiGetFwProtocol(ipmi::Context::ptr& /*ctx*/)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetFwProtocol (0x21): handler entered",
+        phosphor::logging::entry("PROTOCOL_VER=0x%02X", oemProtocolVersion));
     return ipmi::responseSuccess(oemProtocolVersion);
 }
 
@@ -390,43 +526,59 @@ ipmi::RspType<uint8_t> ipmiGetFwProtocol(ipmi::Context::ptr& /*ctx*/)
 ipmi::RspType<uint8_t>
     ipmiMuxSwitching(ipmi::Context::ptr& /*ctx*/, uint8_t direction)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MuxSwitching (0xEE): handler entered",
+        phosphor::logging::entry("DIRECTION=%u", direction),
+        phosphor::logging::entry("MEANING=%s",
+                                 direction == 0 ? "BMC (flash->BMC)" : "Host"),
+        phosphor::logging::entry("GPIO_LINE=%u", muxGpioLine));
+
     if (direction > 1)
     {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "MuxSwitching (0xEE): invalid direction byte",
+            phosphor::logging::entry("DIRECTION=0x%02X", direction));
         return ipmi::responseInvalidFieldRequest();
     }
 
-    // Drive GPIOJ1 via the D-Bus GPIO interface exposed by phosphor-gpio-util
-    // (or directly via the kernel /sys/class/gpio if not yet bridged).
-    // For now use the D-Bus GpioInterface that entity-manager/phosphor-gpio
-    // exposes at xyz.openbmc_project.Gpio.
     try
     {
-        auto dbus = getSdBus();
-        // The gpio-line-names entry for line 73 on the AST2500 is "SPI_MUX_SEL"
-        // as defined in the X570D4I-2T DTS.  We call the phosphor GPIO manager.
-        std::string svc = "xyz.openbmc_project.Gpio";
-        std::string obj = "/xyz/openbmc_project/gpio/SPI_MUX_SEL";
+        auto        dbus = getSdBus();
+        std::string svc  = "xyz.openbmc_project.Gpio";
+        std::string obj  = "/xyz/openbmc_project/gpio/SPI_MUX_SEL";
         std::string intf = "xyz.openbmc_project.Gpio";
 
-        auto setMsg = dbus->new_method_call(svc.c_str(), obj.c_str(),
-                                             "org.freedesktop.DBus.Properties",
-                                             "Set");
-        setMsg.append(intf, "Value",
-                      std::variant<bool>(direction != 0));
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "MuxSwitching (0xEE): calling D-Bus Set",
+            phosphor::logging::entry("SVC=%s", svc.c_str()),
+            phosphor::logging::entry("OBJ=%s", obj.c_str()),
+            phosphor::logging::entry("VALUE=%s",
+                                     direction != 0 ? "true" : "false"));
+
+        auto setMsg = dbus->new_method_call(
+            svc.c_str(), obj.c_str(), "org.freedesktop.DBus.Properties", "Set");
+        setMsg.append(intf, "Value", std::variant<bool>(direction != 0));
         dbus->call_noreply(setMsg);
 
         phosphor::logging::log<phosphor::logging::level::INFO>(
-            "ipmiMuxSwitching: GPIOJ1 set",
-            phosphor::logging::entry("DIRECTION=%u", direction));
+            "MuxSwitching (0xEE): GPIOJ1 set successfully",
+            phosphor::logging::entry("DIRECTION=%u", direction),
+            phosphor::logging::entry("GPIO_VALUE=%s",
+                                     direction != 0 ? "HIGH (Host)" :
+                                                      "LOW (BMC)"));
     }
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::ERR>(
-            "ipmiMuxSwitching: GPIO control failed",
+            "MuxSwitching (0xEE): GPIO D-Bus call failed",
+            phosphor::logging::entry("OBJ=/xyz/openbmc_project/gpio/SPI_MUX_SEL"),
             phosphor::logging::entry("ERROR=%s", e.what()));
         return ipmi::responseUnspecifiedError();
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MuxSwitching (0xEE): responding",
+        phosphor::logging::entry("ECHO_DIRECTION=%u", direction));
     return ipmi::responseSuccess(direction);
 }
 
@@ -449,14 +601,18 @@ ipmi::RspType<uint8_t>
 // -----------------------------------------------------------------------
 
 ipmi::RspType<> ipmiPeciReadWrite(ipmi::Context::ptr& /*ctx*/,
-                                   uint8_t /*cpuAddr*/,
-                                   uint8_t /*readLen*/,
-                                   std::vector<uint8_t> /*writeData*/)
+                                   uint8_t cpuAddr, uint8_t readLen,
+                                   std::vector<uint8_t> writeData)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "PeciReadWrite (0xE9): handler entered — AMD APML stub",
+        phosphor::logging::entry("CPU_ADDR=0x%02X", cpuAddr),
+        phosphor::logging::entry("READ_LEN=%u", readLen),
+        phosphor::logging::entry("WRITE_LEN=%zu", writeData.size()));
     // AMD APML bridge not yet implemented — return error rather than
     // ipmi::responseInvalidCommand() so the BIOS knows the slot exists.
     phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "ipmiPeciReadWrite: AMD APML not yet implemented");
+        "PeciReadWrite (0xE9): returning unspecifiedError (APML not wired)");
     return ipmi::responseUnspecifiedError();
 }
 
@@ -477,50 +633,66 @@ ipmi::RspType<> ipmiPeciReadWrite(ipmi::Context::ptr& /*ctx*/,
 
 ipmi::RspType<uint8_t> ipmiPsuInfo(ipmi::Context::ptr& /*ctx*/)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "PsuInfo (0xEC): handler entered");
+
     uint8_t status = 0;
 
     try
     {
         auto dbus = getSdBus();
-        // Enumerate PSU objects
-        auto msg = dbus->new_method_call(
+        auto msg  = dbus->new_method_call(
             "xyz.openbmc_project.ObjectMapper",
             "/xyz/openbmc_project/object_mapper",
-            "xyz.openbmc_project.ObjectMapper",
-            "GetSubTreePaths");
+            "xyz.openbmc_project.ObjectMapper", "GetSubTreePaths");
         msg.append("/xyz/openbmc_project/inventory/system", 2,
                    std::vector<std::string>{psuItemIntf});
-        auto reply = dbus->call(msg);
+        auto                     reply = dbus->call(msg);
         std::vector<std::string> paths;
         reply.read(paths);
+
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "PsuInfo (0xEC): PSU inventory objects found",
+            phosphor::logging::entry("COUNT=%zu", paths.size()));
 
         for (size_t i = 0; i < paths.size() && i < 4; ++i)
         {
             const auto& path = paths[i];
+            phosphor::logging::log<phosphor::logging::level::DEBUG>(
+                "PsuInfo (0xEC): checking PSU",
+                phosphor::logging::entry("IDX=%zu", i),
+                phosphor::logging::entry("PATH=%s", path.c_str()));
             try
             {
-                // Present bit
                 std::string svc = ipmi::getService(*dbus, psuItemIntf, path);
+
                 ipmi::Value presentV = ipmi::getDbusProperty(
                     *dbus, svc, path,
                     "xyz.openbmc_project.Inventory.Item", "Present");
                 bool present = std::get<bool>(presentV);
                 if (present)
-                {
                     status |= static_cast<uint8_t>(1 << (i * 2));
-                }
 
-                // Functional/online bit
                 ipmi::Value funcV = ipmi::getDbusProperty(
                     *dbus, svc, path, operStateIntf, "Functional");
                 bool functional = std::get<bool>(funcV);
                 if (functional)
-                {
                     status |= static_cast<uint8_t>(1 << (i * 2 + 1));
-                }
+
+                phosphor::logging::log<phosphor::logging::level::INFO>(
+                    "PsuInfo (0xEC): PSU state",
+                    phosphor::logging::entry("IDX=%zu", i),
+                    phosphor::logging::entry("PATH=%s", path.c_str()),
+                    phosphor::logging::entry("PRESENT=%u", present),
+                    phosphor::logging::entry("FUNCTIONAL=%u", functional));
             }
-            catch (...)
+            catch (const std::exception& e)
             {
+                phosphor::logging::log<phosphor::logging::level::WARNING>(
+                    "PsuInfo (0xEC): error querying PSU",
+                    phosphor::logging::entry("IDX=%zu", i),
+                    phosphor::logging::entry("PATH=%s", path.c_str()),
+                    phosphor::logging::entry("ERROR=%s", e.what()));
                 continue;
             }
         }
@@ -528,10 +700,13 @@ ipmi::RspType<uint8_t> ipmiPsuInfo(ipmi::Context::ptr& /*ctx*/)
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::WARNING>(
-            "ipmiPsuInfo: D-Bus query failed",
+            "PsuInfo (0xEC): ObjectMapper query failed",
             phosphor::logging::entry("ERROR=%s", e.what()));
     }
 
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "PsuInfo (0xEC): responding",
+        phosphor::logging::entry("STATUS_BYTE=0x%02X", status));
     return ipmi::responseSuccess(status);
 }
 
@@ -547,33 +722,56 @@ ipmi::RspType<uint8_t> ipmiPsuInfo(ipmi::Context::ptr& /*ctx*/)
 ipmi::RspType<> ipmiManageBmcConfig(ipmi::Context::ptr& /*ctx*/,
                                      uint8_t action)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "ManageBmcConfig (0x2B): handler entered",
+        phosphor::logging::entry("ACTION=0x%02X", action),
+        phosphor::logging::entry("MEANING=%s",
+                                 action == 0x01 ? "warm reset" :
+                                 action == 0x02 ? "cold reset" : "unknown"));
+
     if (action != 0x01 && action != 0x02)
     {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "ManageBmcConfig (0x2B): invalid action byte",
+            phosphor::logging::entry("ACTION=0x%02X", action));
         return ipmi::responseInvalidFieldRequest();
     }
 
+    const std::string targetState =
+        (action == 0x02)
+            ? "xyz.openbmc_project.State.BMC.Transition.HardReboot"
+            : "xyz.openbmc_project.State.BMC.Transition.Reboot";
+
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "ipmiManageBmcConfig: BMC reset requested",
-        phosphor::logging::entry("ACTION=0x%02X", action));
+        "ManageBmcConfig (0x2B): requesting BMC state transition",
+        phosphor::logging::entry("ACTION=0x%02X", action),
+        phosphor::logging::entry("TARGET_STATE=%s", targetState.c_str()));
+
     try
     {
-        auto dbus = getSdBus();
+        auto        dbus    = getSdBus();
         std::string service = "xyz.openbmc_project.State.BMC";
-        std::string objPath  = "/xyz/openbmc_project/state/bmc0";
-        std::string intf     = "xyz.openbmc_project.State.BMC";
+        std::string objPath = "/xyz/openbmc_project/state/bmc0";
+        std::string intf    = "xyz.openbmc_project.State.BMC";
 
-        const std::string targetState =
-            (action == 0x02)
-                ? "xyz.openbmc_project.State.BMC.Transition.HardReboot"
-                : "xyz.openbmc_project.State.BMC.Transition.Reboot";
+        phosphor::logging::log<phosphor::logging::level::DEBUG>(
+            "ManageBmcConfig (0x2B): calling setDbusProperty",
+            phosphor::logging::entry("SVC=%s", service.c_str()),
+            phosphor::logging::entry("OBJ=%s", objPath.c_str()),
+            phosphor::logging::entry("PROP=RequestedBMCTransition"),
+            phosphor::logging::entry("VALUE=%s", targetState.c_str()));
 
         ipmi::setDbusProperty(*dbus, service, objPath, intf,
                               "RequestedBMCTransition", targetState);
+
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "ManageBmcConfig (0x2B): BMC reset transition accepted");
     }
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::ERR>(
-            "ipmiManageBmcConfig: D-Bus reset request failed",
+            "ManageBmcConfig (0x2B): D-Bus reset request failed",
+            phosphor::logging::entry("TARGET=%s", targetState.c_str()),
             phosphor::logging::entry("ERROR=%s", e.what()));
         return ipmi::responseUnspecifiedError();
     }
@@ -595,7 +793,9 @@ ipmi::RspType<> ipmiManageBmcConfig(ipmi::Context::ptr& /*ctx*/,
 
 ipmi::RspType<uint8_t> ipmiGetSelPolicy(ipmi::Context::ptr& /*ctx*/)
 {
-    return ipmi::responseSuccess(static_cast<uint8_t>(0)); // wrap
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "GetSelPolicy (0x30): handler entered — returning wrap policy (0x00)");
+    return ipmi::responseSuccess(static_cast<uint8_t>(0)); // 0 = circular/wrap
 }
 
 // -----------------------------------------------------------------------
@@ -609,9 +809,13 @@ ipmi::RspType<uint8_t> ipmiGetSelPolicy(ipmi::Context::ptr& /*ctx*/)
 // rather than an IPMI "destination unavailable" transport error.
 // -----------------------------------------------------------------------
 
-static ipmi::RspType<> ipmiYafuStub(ipmi::Context::ptr& /*ctx*/,
+static ipmi::RspType<> ipmiYafuStub(ipmi::Context::ptr& ctx,
                                      [[maybe_unused]] std::vector<uint8_t> req)
 {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "YafuStub: YAFU probe received — returning invalidCommand",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("NOTE=use phosphor-ipmi-blobs for FW upload"));
     return ipmi::responseInvalidCommand();
 }
 
