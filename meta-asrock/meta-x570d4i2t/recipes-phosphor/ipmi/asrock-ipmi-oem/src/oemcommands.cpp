@@ -25,6 +25,7 @@
 //       actual firmware-upload path uses phosphor-ipmi-blobs.
 
 #include <oemcommands.hpp>
+#include <amiconverter.hpp>
 
 #include <ipmid/api.hpp>
 #include <ipmid/message.hpp>
@@ -34,7 +35,10 @@
 #include <sdbusplus/bus.hpp>
 
 #include <array>
+#include <cstdio>
+#include <cstring>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
@@ -819,6 +823,523 @@ static ipmi::RspType<> ipmiYafuStub(ipmi::Context::ptr& ctx,
     return ipmi::responseInvalidCommand();
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// AMI MDR SMBIOS hooks
+//
+// These handlers are registered at prioOemBase (> prioOpenBmcBase used by
+// smbiosmdrv2handler.cpp) so they WIN on every shared command code and log
+// the exact byte payloads the BIOS sends. That gives full protocol visibility
+// in journalctl during POST without a separate bus trace.
+//
+// Order of operations mirrors ami-ipmi-oem.cpp (the reference guide):
+//   Write path: 0x3D GetMdrStatus → 0x51 WriteBegin → 0x52 WriteChunk(s)
+//               → 0x53 WriteEnd; or legacy 0x5D phase=01/02
+//   Read  path: 0x71 RegionStatus → 0x72 GetBlock (chunked reads)
+//   Agent/Dir:  0x31 GetDir
+//   AMI propr:  0xB2 SetBiosInfo · 0xA0 SetMdrPos · 0xB5 SetSmbiosChunk
+//               · 0xA1 GetMdrStatus · 0xF3 GetStatus
+//
+// NOTE: 0x30 (AgentStatus) intentionally NOT added — it collides with the
+// existing GetSelPolicy handler on the same NetFn/Cmd slot.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Command codes (AMI MDR on NetFn 0x3A) ──────────────────────────────
+static constexpr ipmi::Cmd kMdrGetDir        = 0x31;
+static constexpr ipmi::Cmd kMdrGetStatus     = 0x3D;
+static constexpr ipmi::Cmd kMdrWriteBegin    = 0x51;
+static constexpr ipmi::Cmd kMdrWriteChunk    = 0x52;
+static constexpr ipmi::Cmd kMdrWriteEnd      = 0x53;
+static constexpr ipmi::Cmd kMdrLegacyCtrl    = 0x5D;
+static constexpr ipmi::Cmd kMdrRegionStatus  = 0x71;
+static constexpr ipmi::Cmd kMdrGetBlock      = 0x72;
+static constexpr ipmi::Cmd kAmiSetMdrPos     = 0xA0;
+static constexpr ipmi::Cmd kAmiGetMdrStatus  = 0xA1;
+static constexpr ipmi::Cmd kAmiSetBiosInfo   = 0xB2;
+static constexpr ipmi::Cmd kAmiSetSmbiosChunk = 0xB5;
+static constexpr ipmi::Cmd kAmiGetStatus     = 0xF3;
+
+// ── Region IDs ──────────────────────────────────────────────────────────
+static constexpr uint8_t kOemRegionSmbios = 0;
+static constexpr uint8_t kOemRegionMeta   = 1;
+
+// ── Write-path accumulation state ───────────────────────────────────────
+enum class OemMdrState : uint8_t { Idle, Open, Receiving };
+static OemMdrState          g_oemState       = OemMdrState::Idle;
+static uint32_t             g_oemDeclared    = 0;
+static std::vector<uint8_t> g_oemWriteBuf;
+
+// ── Hex-dump helper (logs up to 64 bytes) ───────────────────────────────
+static std::string mdrHex(const std::vector<uint8_t>& v)
+{
+    std::ostringstream os;
+    size_t limit = std::min(v.size(), size_t{64});
+    for (size_t i = 0; i < limit; ++i)
+    {
+        char b[4];
+        snprintf(b, sizeof(b), "%02X ", v[i]);
+        os << b;
+    }
+    if (v.size() > limit) os << "...(" << v.size() << "B)";
+    return os.str();
+}
+
+// ── 0x31 GetDir ─────────────────────────────────────────────────────────
+// Caller: BIOS during POST. Request = [agentId:2 LE, dirIndex:1].
+// Returns 1 SMBIOS region entry with valid=0 (BMC ready to receive).
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrGetDir(ipmi::Context::ptr& /*ctx*/,
+                  std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x31 GetDir",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    uint16_t agentId  = (req.size() >= 2)
+                            ? static_cast<uint16_t>(req[0] | (req[1] << 8))
+                            : 0;
+    uint8_t  dirIndex = (req.size() >= 3) ? req[2] : 0;
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x31 GetDir parsed",
+        phosphor::logging::entry("AGENT_ID=0x%04X", agentId),
+        phosphor::logging::entry("DIR_INDEX=%u", dirIndex));
+
+    // Response: [version:1, entryCount:1, remaining:1, entry0(16)]
+    // entry: [regionId, valid, usedSzLo, usedSzHi, allocSzLo, allocSzHi,
+    //         maxSzLo, maxSzHi, checksum, pad×7]
+    // valid=0 signals "ready to receive" — BIOS will proceed to WriteBegin.
+    constexpr uint16_t kMaxSz = 0xFFFF;
+    std::vector<uint8_t> rsp(3 + 16, 0);
+    rsp[0] = 0x01;  // dirVersion
+    rsp[1] = 0x01;  // entryCount
+    rsp[2] = 0x00;  // remaining
+    uint8_t* e = rsp.data() + 3;
+    e[0] = kOemRegionSmbios;
+    e[1] = 0x00;                       // valid=0: not yet populated
+    e[2] = 0x00; e[3] = 0x00;          // usedSize=0
+    e[4] = kMaxSz & 0xFF;
+    e[5] = (kMaxSz >> 8) & 0xFF;       // allocSize
+    e[6] = kMaxSz & 0xFF;
+    e[7] = (kMaxSz >> 8) & 0xFF;       // maxSize
+    e[8] = 0x00;                       // checksum=0
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x31 GetDir RSP valid=0 (ready to receive)",
+        phosphor::logging::entry("RSP_HEX=%s", mdrHex(rsp).c_str()));
+    return ipmi::responseSuccess(rsp);
+}
+
+// ── 0x3D GetMdrStatus ───────────────────────────────────────────────────
+// BIOS handshake: advertise max-chunk and version.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrGetStatus(ipmi::Context::ptr& /*ctx*/,
+                     std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x3D GetMdrStatus",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
+        phosphor::logging::entry("STATE=%u", static_cast<uint8_t>(g_oemState)),
+        phosphor::logging::entry("BUF_BYTES=%zu", g_oemWriteBuf.size()));
+
+    // [status, maxChunkLo, maxChunkHi, mdrVer]
+    // status 0x00 = "has data" / 0x01 = "need data"
+    auto cached = ami::loadMdrPayload();
+    uint8_t status = cached.empty() ? 0x01 : 0x00;
+    std::vector<uint8_t> rsp = {status, 0x00, 0x10, 0x01};
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x3D GetMdrStatus RSP",
+        phosphor::logging::entry("STATUS=0x%02X", status),
+        phosphor::logging::entry("RSP_HEX=%s", mdrHex(rsp).c_str()));
+    return ipmi::responseSuccess(rsp);
+}
+
+// ── 0x51 WriteBegin ──────────────────────────────────────────────────────
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrWriteBegin(ipmi::Context::ptr& /*ctx*/,
+                      std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x51 WriteBegin",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    uint32_t declared = 0;
+    if (req.size() >= 3)
+        declared = static_cast<uint32_t>(req[1]) | (static_cast<uint32_t>(req[2]) << 8);
+    else if (req.size() >= 2)
+        declared = req[1];
+
+    g_oemWriteBuf.clear();
+    if (declared) g_oemWriteBuf.reserve(declared);
+    g_oemDeclared = declared;
+    g_oemState    = OemMdrState::Open;
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x51 WriteBegin: session opened",
+        phosphor::logging::entry("DECLARED_BYTES=%u", declared));
+
+    return ipmi::responseSuccess(std::vector<uint8_t>{});
+}
+
+// ── 0x52 WriteChunk ──────────────────────────────────────────────────────
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrWriteChunk(ipmi::Context::ptr& /*ctx*/,
+                      std::vector<uint8_t> req)
+{
+    if (req.size() < 4)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "MDR 0x52 WriteChunk: too short",
+            phosphor::logging::entry("REQ_BYTES=%zu", req.size()));
+        return ipmi::responseReqDataLenInvalid();
+    }
+
+    uint8_t  regionId  = req[0];
+    uint16_t offset    = static_cast<uint16_t>(req[1]) | (static_cast<uint16_t>(req[2]) << 8);
+    size_t   payloadSz = req.size() - 3;
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x52 WriteChunk",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("OFFSET=0x%04X", offset),
+        phosphor::logging::entry("PAYLOAD_BYTES=%zu", payloadSz),
+        phosphor::logging::entry("FIRST_HEX=%s",
+            mdrHex(std::vector<uint8_t>(req.begin()+3,
+                   req.begin()+3+std::min(payloadSz,size_t{16}))).c_str()));
+
+    if (g_oemState == OemMdrState::Idle)
+    {
+        g_oemWriteBuf.clear();
+        g_oemDeclared = 0;
+        g_oemState    = OemMdrState::Open;
+    }
+
+    size_t needed = static_cast<size_t>(offset) + payloadSz;
+    if (needed > g_oemWriteBuf.size())
+        g_oemWriteBuf.resize(needed, 0);
+    std::copy(req.begin() + 3, req.end(), g_oemWriteBuf.begin() + offset);
+    g_oemState = OemMdrState::Receiving;
+
+    return ipmi::responseSuccess(std::vector<uint8_t>{});
+}
+
+// ── 0x53 WriteEnd ────────────────────────────────────────────────────────
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrWriteEnd(ipmi::Context::ptr& /*ctx*/,
+                    std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x53 WriteEnd",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
+        phosphor::logging::entry("ACCUM_BYTES=%zu", g_oemWriteBuf.size()),
+        phosphor::logging::entry("DECLARED=%u", g_oemDeclared));
+
+    if (!g_oemWriteBuf.empty())
+    {
+        // Log first 32 bytes of the accumulated SMBIOS payload
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "MDR 0x53 WriteEnd: SMBIOS payload head",
+            phosphor::logging::entry("HEAD_HEX=%s", mdrHex(g_oemWriteBuf).c_str()));
+
+        if (ami::persistAmiBuffer(g_oemWriteBuf.data(), g_oemWriteBuf.size()))
+        {
+            ami::triggerMdrSync();
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "MDR 0x53 WriteEnd: committed to disk and synced",
+                phosphor::logging::entry("BYTES=%zu", g_oemWriteBuf.size()));
+        }
+        else
+        {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+                "MDR 0x53 WriteEnd: persistAmiBuffer failed");
+        }
+        g_oemWriteBuf.clear();
+    }
+    g_oemState    = OemMdrState::Idle;
+    g_oemDeclared = 0;
+
+    return ipmi::responseSuccess(std::vector<uint8_t>{});
+}
+
+// ── 0x5D LegacyCtrl (two-phase begin/end) ───────────────────────────────
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrLegacyCtrl(ipmi::Context::ptr& /*ctx*/,
+                      std::vector<uint8_t> req)
+{
+    uint8_t phase = req.empty() ? 0 : req[0];
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x5D LegacyCtrl",
+        phosphor::logging::entry("PHASE=0x%02X", phase),
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
+        phosphor::logging::entry("BUF_BYTES=%zu", g_oemWriteBuf.size()));
+
+    if (phase == 0x01)
+    {
+        g_oemWriteBuf.clear();
+        g_oemDeclared = 0;
+        g_oemState    = OemMdrState::Open;
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "MDR 0x5D phase=01: session opened");
+    }
+    else if (phase == 0x02)
+    {
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "MDR 0x5D phase=02: commit",
+            phosphor::logging::entry("ACCUM_BYTES=%zu", g_oemWriteBuf.size()));
+        if (!g_oemWriteBuf.empty())
+        {
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "MDR 0x5D payload head",
+                phosphor::logging::entry("HEAD_HEX=%s", mdrHex(g_oemWriteBuf).c_str()));
+            if (ami::persistAmiBuffer(g_oemWriteBuf.data(), g_oemWriteBuf.size()))
+                ami::triggerMdrSync();
+            g_oemWriteBuf.clear();
+        }
+        g_oemState    = OemMdrState::Idle;
+        g_oemDeclared = 0;
+    }
+
+    // AMI BIOS expects 1-byte status; without it the KCS driver waits ~5s.
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// ── 0x71 RegionStatus ───────────────────────────────────────────────────
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrRegionStatus(ipmi::Context::ptr& /*ctx*/,
+                        std::vector<uint8_t> req)
+{
+    uint8_t regionId = req.empty() ? 0 : req[0];
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x71 RegionStatus",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
+        phosphor::logging::entry("STATE=%u", static_cast<uint8_t>(g_oemState)));
+
+    auto cached = ami::loadMdrPayload();
+    bool valid   = !cached.empty();
+    uint16_t sz  = valid ? static_cast<uint16_t>(cached.size()) : 0;
+    uint16_t chk = valid ? ami::computeChecksum(cached.data(), cached.size()) : 0;
+
+    // [mdrVer, regionId, valid, lock, updateCnt, szLo, szHi, usedLo, usedHi, chkLo]
+    std::vector<uint8_t> rsp(10, 0);
+    rsp[0] = 0x01;
+    rsp[1] = regionId;
+    rsp[2] = valid ? 0x01 : 0x00;
+    rsp[3] = (g_oemState != OemMdrState::Idle) ? 0x01 : 0x00;
+    rsp[4] = 0x00;
+    rsp[5] = sz  & 0xFF;
+    rsp[6] = (sz  >> 8) & 0xFF;
+    rsp[7] = sz  & 0xFF;
+    rsp[8] = (sz  >> 8) & 0xFF;
+    rsp[9] = chk & 0xFF;
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x71 RegionStatus RSP",
+        phosphor::logging::entry("VALID=%u", valid),
+        phosphor::logging::entry("SIZE=%u", sz),
+        phosphor::logging::entry("RSP_HEX=%s", mdrHex(rsp).c_str()));
+    return ipmi::responseSuccess(rsp);
+}
+
+// ── 0x72 GetBlock ────────────────────────────────────────────────────────
+// BIOS reads SMBIOS data. Region 0 = payload; Region 1 = meta header.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiMdrGetBlock(ipmi::Context::ptr& /*ctx*/,
+                    std::vector<uint8_t> req)
+{
+    if (req.size() < 3)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "MDR 0x72 GetBlock: too short",
+            phosphor::logging::entry("REQ_BYTES=%zu", req.size()));
+        return ipmi::responseReqDataLenInvalid();
+    }
+    uint8_t  regionId = req[0];
+    uint16_t offset   = static_cast<uint16_t>(req[1]) | (static_cast<uint16_t>(req[2]) << 8);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x72 GetBlock",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("OFFSET=0x%04X", offset),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    auto cached = ami::loadMdrPayload();
+
+    std::vector<uint8_t> source;
+    if (regionId == kOemRegionMeta)
+    {
+        // Synthesize a 4-byte mini meta-header [dataSize:2LE, checksum:2LE]
+        uint16_t sz  = static_cast<uint16_t>(cached.size());
+        uint16_t chk = ami::computeChecksum(cached.data(), cached.size());
+        source = {static_cast<uint8_t>(sz & 0xFF),
+                  static_cast<uint8_t>((sz >> 8) & 0xFF),
+                  static_cast<uint8_t>(chk & 0xFF),
+                  static_cast<uint8_t>((chk >> 8) & 0xFF)};
+    }
+    else if (regionId == kOemRegionSmbios)
+    {
+        source = cached;
+    }
+
+    if (source.empty() || offset >= source.size())
+    {
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "MDR 0x72 GetBlock: empty/past-end",
+            phosphor::logging::entry("REGION=%u", regionId),
+            phosphor::logging::entry("SOURCE_SIZE=%zu", source.size()));
+        return ipmi::responseSuccess(std::vector<uint8_t>{});
+    }
+
+    constexpr size_t kChunk = 4096;
+    size_t sendLen = std::min(source.size() - offset, kChunk);
+    std::vector<uint8_t> rsp(source.begin() + offset,
+                              source.begin() + offset + sendLen);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0x72 GetBlock RSP",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("SEND_BYTES=%zu", sendLen),
+        phosphor::logging::entry("TOTAL=%zu", source.size()),
+        phosphor::logging::entry("HEAD_HEX=%s", mdrHex(rsp).c_str()));
+    return ipmi::responseSuccess(rsp);
+}
+
+// ── 0xA0 SetMdrPos / BackupBmcMacDxe ────────────────────────────────────
+// BIOS RE shows this is BackupBmcMacDxe: body = [LAN_channel:1][MAC:6]
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiSetMdrPos(ipmi::Context::ptr& /*ctx*/,
+                     std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA0 SetMdrPos",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    if (req.size() >= 7)
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "AMI 0xA0 SetMdrPos: BackupBmcMacDxe",
+            phosphor::logging::entry("LAN_CH=%u", req[0]),
+            phosphor::logging::entry("MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+                req[1], req[2], req[3], req[4], req[5], req[6]));
+
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// ── 0xA1 GetMdrStatus ───────────────────────────────────────────────────
+// BIOS queries current region size + checksum.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiGetMdrStatus(ipmi::Context::ptr& /*ctx*/,
+                        std::vector<uint8_t> req)
+{
+    uint8_t regionId = req.empty() ? 0 : req[0];
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA1 GetMdrStatus",
+        phosphor::logging::entry("REGION=%u", regionId),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    auto cached = ami::loadMdrPayload();
+    bool     valid = !cached.empty();
+    uint16_t sz    = valid ? static_cast<uint16_t>(cached.size()) : 0;
+    uint16_t chk   = valid ? ami::computeChecksum(cached.data(), cached.size()) : 0;
+
+    std::vector<uint8_t> rsp = {
+        regionId,
+        valid ? uint8_t{0x01} : uint8_t{0x00},
+        static_cast<uint8_t>(sz  & 0xFF),
+        static_cast<uint8_t>((sz  >> 8) & 0xFF),
+        static_cast<uint8_t>(chk & 0xFF),
+        static_cast<uint8_t>((chk >> 8) & 0xFF),
+    };
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "MDR 0xA1 GetMdrStatus RSP",
+        phosphor::logging::entry("VALID=%u", valid),
+        phosphor::logging::entry("SIZE=%u", sz),
+        phosphor::logging::entry("RSP_HEX=%s", mdrHex(rsp).c_str()));
+    return ipmi::responseSuccess(rsp);
+}
+
+// ── 0xB2 SetBiosInfo ────────────────────────────────────────────────────
+// BIOS sends a 16-byte version block. Log every byte for decoding.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiSetBiosInfo(ipmi::Context::ptr& /*ctx*/,
+                       std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xB2 SetBiosInfo",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    if (req.size() >= 8)
+    {
+        uint8_t major   = req[1];
+        uint8_t minorHi = (req[2] >> 4) & 0xF;
+        uint8_t minorLo =  req[2]       & 0xF;
+        uint8_t revCh   = req[3];
+        char ver[16];
+        if (revCh >= 0x20 && revCh < 0x7F && revCh != ' ')
+            snprintf(ver, sizeof(ver), "%u.%u%u%c", major, minorHi, minorLo, revCh);
+        else
+            snprintf(ver, sizeof(ver), "%u.%u%u",   major, minorHi, minorLo);
+
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "AMI 0xB2 SetBiosInfo decoded",
+            phosphor::logging::entry("VERSION=%s", ver),
+            phosphor::logging::entry("DATE_BCD=%02X/%02X/%02X%02X",
+                req[4], req[5], req[6], req[7]));
+    }
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// ── 0xB5 SetSmbiosChunk ──────────────────────────────────────────────────
+// Wire format: [reserved=0x00][ASCII string...][NUL].
+// Each call is one SMBIOS string fragment pushed by SendInfoBmcIpmiDxe.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiSetSmbiosChunk(ipmi::Context::ptr& /*ctx*/,
+                          std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xB5 SetSmbiosChunk",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+
+    // Extract the null-terminated string after the reserved byte
+    if (req.size() >= 2 && req[0] == 0x00)
+    {
+        size_t end = req.size();
+        if (end > 1 && req[end - 1] == 0x00) end--;
+        std::string s(req.begin() + 1, req.begin() + end);
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+            "AMI 0xB5 SetSmbiosChunk string",
+            phosphor::logging::entry("VALUE=%s", s.c_str()),
+            phosphor::logging::entry("LEN=%zu", s.size()));
+    }
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x01});
+}
+
+// ── 0xF3 GetStatus ───────────────────────────────────────────────────────
+// BIOS polls until BMC acks completion. We always ack ready.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiGetStatus(ipmi::Context::ptr& /*ctx*/,
+                     std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xF3 GetStatus",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
+        phosphor::logging::entry("STATE=%u", static_cast<uint8_t>(g_oemState)),
+        phosphor::logging::entry("BUF_BYTES=%zu", g_oemWriteBuf.size()));
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// end MDR SMBIOS hooks
+// ═══════════════════════════════════════════════════════════════════════
+
 // -----------------------------------------------------------------------
 // Handler registration
 // Runs before main() via __attribute__((constructor)).
@@ -893,6 +1414,52 @@ static void registerOEMFunctions()
                               static_cast<ipmi::Cmd>(cmd),
                               ipmi::Privilege::Admin, ipmiYafuStub);
     }
+
+    // ── MDR SMBIOS hooks — prioOemBase wins over prioOpenBmcBase in
+    //    smbiosmdrv2handler.cpp, ensuring full payload logging.
+    //    Registered on netFnOemSix (0x3A) only — the AMI MDR NetFn.
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrGetDir,       ipmi::Privilege::Admin, ipmiMdrGetDir);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrGetStatus,    ipmi::Privilege::Admin, ipmiMdrGetStatus);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrWriteBegin,   ipmi::Privilege::Admin, ipmiMdrWriteBegin);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrWriteChunk,   ipmi::Privilege::Admin, ipmiMdrWriteChunk);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrWriteEnd,     ipmi::Privilege::Admin, ipmiMdrWriteEnd);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrLegacyCtrl,   ipmi::Privilege::Admin, ipmiMdrLegacyCtrl);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrRegionStatus, ipmi::Privilege::Admin, ipmiMdrRegionStatus);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kMdrGetBlock,     ipmi::Privilege::Admin, ipmiMdrGetBlock);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiSetMdrPos,    ipmi::Privilege::Admin, ipmiAmiSetMdrPos);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiGetMdrStatus, ipmi::Privilege::Admin, ipmiAmiGetMdrStatus);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiSetBiosInfo,  ipmi::Privilege::Admin, ipmiAmiSetBiosInfo);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiSetSmbiosChunk, ipmi::Privilege::Admin, ipmiAmiSetSmbiosChunk);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiGetStatus,    ipmi::Privilege::Admin, ipmiAmiGetStatus);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "ASRock MDR SMBIOS hooks registered (prioOemBase, NetFn 0x3A)");
 }
 
 } // namespace asrock

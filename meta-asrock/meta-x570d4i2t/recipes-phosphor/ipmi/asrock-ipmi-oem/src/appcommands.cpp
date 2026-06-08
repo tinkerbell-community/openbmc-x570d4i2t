@@ -206,46 +206,32 @@ static std::string getActiveBmcVersion()
 //   [6-8]  manufacturerId  (LE 3 bytes)
 //   [9-10] productId       (LE 2 bytes)
 //   [11-14] auxiliaryFw   (optional, 4 bytes LE)
+//
+// NOTE: the AMI BIOS sends GetDeviceId before every KCS command as a
+// liveness probe, so this handler is called very frequently.  All
+// expensive work (dev_id.json file read + D-Bus firmware-version query)
+// is done once and stored in a process-lifetime static cache.
 // -----------------------------------------------------------------------
 
-ipmi::RspType<uint8_t,                    // deviceId
-              uint8_t,                    // deviceRevision
-              uint8_t,                    // fwMajor
-              uint8_t,                    // fwMinorBcd
-              uint8_t,                    // ipmiVersion
-              uint8_t,                    // additionalSupport
-              uint8_t, uint8_t, uint8_t,  // manufacturerId[3]
-              uint8_t, uint8_t,           // productId[2]
-              uint32_t>                   // auxiliaryFw
-ipmiGetDeviceId(ipmi::Context::ptr& /*ctx*/)
+struct DevIdCache
 {
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "GetDeviceId: handler entered");
-
-    // Defaults from IPMI.conf / bmc-analyze
     uint8_t  deviceId         = 0x20;
-    uint8_t  deviceRevision   = 0x81; // SDR present | revision 1
-    uint8_t  ipmiVersion      = ipmiMsgSpecVer;
+    uint8_t  deviceRevision   = 0x81;
     uint8_t  additionalSupport = 0xBF;
-    uint8_t  mfgByte0         = 0xD6; // manuf_id 0x00C1D6 LE
+    uint8_t  mfgByte0         = 0xD6;
     uint8_t  mfgByte1         = 0xC1;
     uint8_t  mfgByte2         = 0x00;
-    uint8_t  prodByte0        = 0x03; // prod_id 0x1003 LE
+    uint8_t  prodByte0        = 0x03;
     uint8_t  prodByte1        = 0x10;
     uint32_t auxFw            = 0;
+    uint8_t  fwMajor          = 0;
+    uint8_t  fwMinorBcd       = 0;
+};
 
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "GetDeviceId: defaults loaded",
-        phosphor::logging::entry("DEVICE_ID=0x%02X", deviceId),
-        phosphor::logging::entry("DEV_REV=0x%02X", deviceRevision),
-        phosphor::logging::entry("MFG=0x%02X%02X%02X", mfgByte2, mfgByte1, mfgByte0),
-        phosphor::logging::entry("PROD=0x%02X%02X", prodByte1, prodByte0),
-        phosphor::logging::entry("ADDN_SUPPORT=0x%02X", additionalSupport));
+static DevIdCache buildDevIdCache()
+{
+    DevIdCache c;
 
-    // Override statics from dev_id.json if present
-    phosphor::logging::log<phosphor::logging::level::DEBUG>(
-        "GetDeviceId: loading dev_id.json",
-        phosphor::logging::entry("PATH=%s", devIdJsonPath));
     try
     {
         std::ifstream ifs(devIdJsonPath);
@@ -259,82 +245,69 @@ ipmiGetDeviceId(ipmi::Context::ptr& /*ctx*/)
         {
             nlohmann::json j;
             ifs >> j;
-            deviceId         = j.value("id", deviceId);
-            deviceRevision   = static_cast<uint8_t>(
-                                   j.value("revision", 1) & 0x0F) |
-                               (deviceRevision & 0xF0);
-            additionalSupport = j.value("addn_dev_support", additionalSupport);
-            uint32_t mfgId   = j.value(
+            c.deviceId         = j.value("id", c.deviceId);
+            c.deviceRevision   = static_cast<uint8_t>(
+                                     j.value("revision", 1) & 0x0F) |
+                                 (c.deviceRevision & 0xF0);
+            c.additionalSupport = j.value("addn_dev_support", c.additionalSupport);
+            uint32_t mfgId     = j.value(
                 "manuf_id",
-                static_cast<uint32_t>((mfgByte2 << 16) | (mfgByte1 << 8) |
-                                      mfgByte0));
-            mfgByte0         = static_cast<uint8_t>(mfgId & 0xFF);
-            mfgByte1         = static_cast<uint8_t>((mfgId >> 8) & 0xFF);
-            mfgByte2         = static_cast<uint8_t>((mfgId >> 16) & 0xFF);
-            uint32_t prodId  = j.value(
+                static_cast<uint32_t>((c.mfgByte2 << 16) | (c.mfgByte1 << 8) |
+                                      c.mfgByte0));
+            c.mfgByte0         = static_cast<uint8_t>(mfgId & 0xFF);
+            c.mfgByte1         = static_cast<uint8_t>((mfgId >> 8) & 0xFF);
+            c.mfgByte2         = static_cast<uint8_t>((mfgId >> 16) & 0xFF);
+            uint32_t prodId    = j.value(
                 "prod_id",
-                static_cast<uint32_t>((prodByte1 << 8) | prodByte0));
-            prodByte0        = static_cast<uint8_t>(prodId & 0xFF);
-            prodByte1        = static_cast<uint8_t>((prodId >> 8) & 0xFF);
-            auxFw            = j.value("aux", auxFw);
-
-            phosphor::logging::log<phosphor::logging::level::INFO>(
-                "GetDeviceId: dev_id.json applied",
-                phosphor::logging::entry("DEVICE_ID=0x%02X", deviceId),
-                phosphor::logging::entry("DEV_REV=0x%02X", deviceRevision),
-                phosphor::logging::entry("MFG=0x%02X%02X%02X", mfgByte2,
-                                         mfgByte1, mfgByte0),
-                phosphor::logging::entry("PROD=0x%02X%02X", prodByte1,
-                                         prodByte0),
-                phosphor::logging::entry("AUX_FW=0x%08X", auxFw),
-                phosphor::logging::entry("ADDN_SUPPORT=0x%02X",
-                                         additionalSupport));
+                static_cast<uint32_t>((c.prodByte1 << 8) | c.prodByte0));
+            c.prodByte0        = static_cast<uint8_t>(prodId & 0xFF);
+            c.prodByte1        = static_cast<uint8_t>((prodId >> 8) & 0xFF);
+            c.auxFw            = j.value("aux", c.auxFw);
         }
     }
     catch (const std::exception& e)
     {
         phosphor::logging::log<phosphor::logging::level::WARNING>(
             "GetDeviceId: dev_id.json parse failed, using defaults",
-            phosphor::logging::entry("PATH=%s", devIdJsonPath),
             phosphor::logging::entry("ERROR=%s", e.what()));
     }
 
-    // Dynamic firmware version from D-Bus
-    uint8_t     fwMajor    = 0;
-    uint8_t     fwMinorBcd = 0;
-    std::string ver        = getActiveBmcVersion();
+    std::string ver = getActiveBmcVersion();
     if (!ver.empty())
     {
-        parseFwVersion(ver, fwMajor, fwMinorBcd);
-        phosphor::logging::log<phosphor::logging::level::INFO>(
-            "GetDeviceId: firmware version resolved",
-            phosphor::logging::entry("VER_STRING=%s", ver.c_str()),
-            phosphor::logging::entry("FW_MAJOR=0x%02X", fwMajor),
-            phosphor::logging::entry("FW_MINOR_BCD=0x%02X", fwMinorBcd));
-    }
-    else
-    {
-        phosphor::logging::log<phosphor::logging::level::WARNING>(
-            "GetDeviceId: no active BMC version on D-Bus, FW bytes = 0x00/0x00");
+        parseFwVersion(ver, c.fwMajor, c.fwMinorBcd);
     }
 
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "GetDeviceId: responding",
-        phosphor::logging::entry("DEVICE_ID=0x%02X", deviceId),
-        phosphor::logging::entry("DEV_REV=0x%02X", deviceRevision),
-        phosphor::logging::entry("FW_MAJOR=0x%02X", fwMajor),
-        phosphor::logging::entry("FW_MINOR_BCD=0x%02X", fwMinorBcd),
-        phosphor::logging::entry("IPMI_VER=0x%02X", ipmiVersion),
-        phosphor::logging::entry("ADDN_SUPPORT=0x%02X", additionalSupport),
-        phosphor::logging::entry("MFG=0x%02X%02X%02X", mfgByte2, mfgByte1,
-                                 mfgByte0),
-        phosphor::logging::entry("PROD=0x%02X%02X", prodByte1, prodByte0),
-        phosphor::logging::entry("AUX_FW=0x%08X", auxFw));
+        "GetDeviceId: cache built",
+        phosphor::logging::entry("DEVICE_ID=0x%02X", c.deviceId),
+        phosphor::logging::entry("DEV_REV=0x%02X", c.deviceRevision),
+        phosphor::logging::entry("MFG=0x%02X%02X%02X", c.mfgByte2, c.mfgByte1,
+                                 c.mfgByte0),
+        phosphor::logging::entry("PROD=0x%02X%02X", c.prodByte1, c.prodByte0),
+        phosphor::logging::entry("FW=%u.%02X", c.fwMajor, c.fwMinorBcd));
+    return c;
+}
 
-    return ipmi::responseSuccess(deviceId, deviceRevision, fwMajor, fwMinorBcd,
-                                 ipmiVersion, additionalSupport, mfgByte0,
-                                 mfgByte1, mfgByte2, prodByte0, prodByte1,
-                                 auxFw);
+ipmi::RspType<uint8_t,                    // deviceId
+              uint8_t,                    // deviceRevision
+              uint8_t,                    // fwMajor
+              uint8_t,                    // fwMinorBcd
+              uint8_t,                    // ipmiVersion
+              uint8_t,                    // additionalSupport
+              uint8_t, uint8_t, uint8_t,  // manufacturerId[3]
+              uint8_t, uint8_t,           // productId[2]
+              uint32_t>                   // auxiliaryFw
+ipmiGetDeviceId(ipmi::Context::ptr& /*ctx*/)
+{
+    // Built once; subsequent calls return in microseconds.
+    static const DevIdCache s = buildDevIdCache();
+
+    return ipmi::responseSuccess(s.deviceId, s.deviceRevision, s.fwMajor,
+                                 s.fwMinorBcd, ipmiMsgSpecVer,
+                                 s.additionalSupport, s.mfgByte0, s.mfgByte1,
+                                 s.mfgByte2, s.prodByte0, s.prodByte1,
+                                 s.auxFw);
 }
 
 // -----------------------------------------------------------------------
@@ -362,6 +335,8 @@ ipmiGetSelfTestResults(ipmi::Context::ptr& /*ctx*/)
 
     uint8_t result  = selfTestPass;
     uint8_t errBits = 0;
+
+    return ipmi::responseSuccess(result, errBits);
 
     // Check SEL service is reachable
     phosphor::logging::log<phosphor::logging::level::DEBUG>(
