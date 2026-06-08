@@ -1454,51 +1454,42 @@ static void registerOEMFunctions()
                               ipmi::Privilege::Admin, ipmiYafuStub);
     }
 
-    // ── MDR SMBIOS hooks — prioOemBase wins over prioOpenBmcBase in
-    //    smbiosmdrv2handler.cpp, ensuring full payload logging.
-    //    Registered on netFnOemSix (0x3A) only — the AMI MDR NetFn.
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrGetDir,       ipmi::Privilege::Admin, ipmiMdrGetDir);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrGetStatus,    ipmi::Privilege::Admin, ipmiMdrGetStatus);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrWriteBegin,   ipmi::Privilege::Admin, ipmiMdrWriteBegin);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrWriteChunk,   ipmi::Privilege::Admin, ipmiMdrWriteChunk);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrWriteEnd,     ipmi::Privilege::Admin, ipmiMdrWriteEnd);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrLegacyCtrl,   ipmi::Privilege::Admin, ipmiMdrLegacyCtrl);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrRegionStatus, ipmi::Privilege::Admin, ipmiMdrRegionStatus);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kMdrGetBlock,     ipmi::Privilege::Admin, ipmiMdrGetBlock);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiSetMdrPos,    ipmi::Privilege::Admin, ipmiAmiSetMdrPos);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiGetMdrStatus, ipmi::Privilege::Admin, ipmiAmiGetMdrStatus);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiSetBiosInfo,  ipmi::Privilege::Admin, ipmiAmiSetBiosInfo);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiSetSmbiosChunk, ipmi::Privilege::Admin, ipmiAmiSetSmbiosChunk);
-    ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiGetStatus,    ipmi::Privilege::Admin, ipmiAmiGetStatus);
+    // ── MDR SMBIOS hooks — registered on BOTH NetFn 0x32 and NetFn 0x3A.
+    //    The AMI BIOS uses both NetFns interchangeably for MDR; missing 0x32
+    //    causes CC errors that make the BIOS abort its MDR SMM handler.
+    for (auto mdrNetFn : {static_cast<ipmi::NetFn>(ipmi::netFnOemTwo),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix)})
+    {
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrGetDir,       ipmi::Privilege::Admin, ipmiMdrGetDir);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrGetStatus,    ipmi::Privilege::Admin, ipmiMdrGetStatus);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrWriteBegin,   ipmi::Privilege::Admin, ipmiMdrWriteBegin);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrWriteChunk,   ipmi::Privilege::Admin, ipmiMdrWriteChunk);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrWriteEnd,     ipmi::Privilege::Admin, ipmiMdrWriteEnd);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrLegacyCtrl,   ipmi::Privilege::Admin, ipmiMdrLegacyCtrl);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrRegionStatus, ipmi::Privilege::Admin, ipmiMdrRegionStatus);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kMdrGetBlock,     ipmi::Privilege::Admin, ipmiMdrGetBlock);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kAmiSetMdrPos,    ipmi::Privilege::Admin, ipmiAmiSetMdrPos);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kAmiGetMdrStatus, ipmi::Privilege::Admin, ipmiAmiGetMdrStatus);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kAmiSetBiosInfo,  ipmi::Privilege::Admin, ipmiAmiSetBiosInfo);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kAmiSetSmbiosChunk, ipmi::Privilege::Admin, ipmiAmiSetSmbiosChunk);
+        ipmi::registerHandler(ipmi::prioOemBase, mdrNetFn,
+                              kAmiGetStatus,    ipmi::Privilege::Admin, ipmiAmiGetStatus);
+    }
 
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "ASRock MDR SMBIOS hooks registered (prioOemBase, NetFn 0x3A)");
+        "ASRock MDR SMBIOS hooks registered (prioOemBase, NetFn 0x32+0x3A)");
 
     // ── Probe handlers for protocol discovery ──────────────────────────
     // Registered at prioOpenBmcBase (< prioOemBase) so real handlers above
@@ -1544,15 +1535,18 @@ static void registerOEMFunctions()
         0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xF6, 0xF7,
         0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE,
     };
-    for (uint8_t c : kProbeCmds)
+    for (auto probeNetFn : {static_cast<ipmi::NetFn>(ipmi::netFnOemTwo),
+                             static_cast<ipmi::NetFn>(ipmi::netFnOemSix)})
     {
-        ipmi::registerHandler(ipmi::prioOpenBmcBase,
-                              static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                              static_cast<ipmi::Cmd>(c),
-                              ipmi::Privilege::Admin, ipmiProbeCmdHandler);
+        for (uint8_t c : kProbeCmds)
+        {
+            ipmi::registerHandler(ipmi::prioOpenBmcBase, probeNetFn,
+                                  static_cast<ipmi::Cmd>(c),
+                                  ipmi::Privilege::Admin, ipmiProbeCmdHandler);
+        }
     }
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "ASRock OEM probe handlers registered (prioOpenBmcBase, NetFn 0x3A)");
+        "ASRock OEM probe handlers registered (prioOpenBmcBase, NetFn 0x32+0x3A)");
 }
 
 } // namespace asrock

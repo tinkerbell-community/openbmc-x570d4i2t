@@ -623,7 +623,9 @@ hMdrGetBlock(ipmi::Context::ptr, uint8_t regionId, uint16_t offset) {
   if (regionId == kRegionMeta) {
     ami::AmiMdrHeader hdr{};
     hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
-    hdr.checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
+    hdr.checksum = g_amiBuf.empty()
+                       ? uint16_t{0}
+                       : ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
     uint8_t hdrBytes[sizeof(hdr)];
     std::memcpy(hdrBytes, &hdr, sizeof(hdr));
     if (offset >= sizeof(hdrBytes))
@@ -655,8 +657,9 @@ hAmiGetMdrStatus(ipmi::Context::ptr, std::vector<uint8_t> req) {
 
   if (regionId == kRegionSmbios) {
     dataSize = static_cast<uint16_t>(g_amiBuf.size());
-    checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
     valid = g_amiBuf.empty() ? 0 : 1;
+    if (!g_amiBuf.empty())
+      checksum = ami::computeChecksum(g_amiBuf.data(), g_amiBuf.size());
   } else if (regionId == kRegionMeta) {
     ami::AmiMdrHeader hdr{};
     hdr.dataSize = static_cast<uint16_t>(g_amiBuf.size());
@@ -718,13 +721,20 @@ static ipmi::RspType<> hAmiSetBiosInfo(ipmi::Context::ptr,
 }
 
 // 0xA0 SetMdrPos — actually BackupBmcMacDxe in this BIOS RE.
-// Body = [LAN_channel:1][mac:6]. We accept and log it.
-static ipmi::RspType<> hAmiSetMdrPos(ipmi::Context::ptr, uint8_t region,
-                                     uint16_t offset) {
-  phosphor::logging::log<phosphor::logging::level::INFO>(
-      "AMI 0xA0 SetMdrPos [BIOS: BackupBmcMacDxe LAN_channel + MAC bytes]",
-      phosphor::logging::entry("REGION=%u", region),
-      phosphor::logging::entry("OFFSET=0x%04X", offset));
+// Body = [LAN_channel:1][mac:6]. Accept raw bytes to avoid silent truncation.
+static ipmi::RspType<> hAmiSetMdrPos(ipmi::Context::ptr,
+                                     std::vector<uint8_t> req) {
+  if (req.size() >= 7) {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA0 SetMdrPos [BackupBmcMacDxe]",
+        phosphor::logging::entry("LAN_CH=%u", req[0]),
+        phosphor::logging::entry("MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+            req[1], req[2], req[3], req[4], req[5], req[6]));
+  } else {
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "AMI 0xA0 SetMdrPos",
+        phosphor::logging::entry("REQ_BYTES=%zu", req.size()));
+  }
   return ipmi::responseSuccess();
 }
 
@@ -790,12 +800,14 @@ static void registerAmiSmbiosHandlers() {
   phosphor::logging::log<phosphor::logging::level::INFO>(
       "AMI SMBIOS: registering 13 handlers on NetFn 0x3A (prioOpenBmcBase)");
 
-  for (ipmi::NetFn nf : {ipmi::netFnOemSix, ipmi::netFnOemTwo, static_cast<ipmi::NetFn>(0x04)}) {
-
-    // Register only on netFnOemSix (0x3A): the ASRock BIOS uses this NetFn for
-    // all AMI MDR and proprietary SMBIOS commands.  Do NOT add netFnOemTwo
-    // (0x32) or the Sensor NetFn (0x04) here — those collide with legitimate
-    // sensor and storage commands at overlapping command codes.
+  // Register fallback handlers only on the two AMI MDR NetFns.
+  // oemcommands.cpp registers the authoritative handlers at prioOemBase on both
+  // 0x32 and 0x3A; these prioOpenBmcBase handlers are the lower-priority
+  // fallback and will never be reached for those commands.
+  // Do NOT include the Sensor NetFn (0x04) — MDR command codes collide with
+  // legitimate sensor commands and the sensor handlers would never see them.
+  for (ipmi::NetFn nf : {static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemTwo)}) {
     ipmi::registerHandler(ipmi::prioOpenBmcBase, nf,
                           kCmdMdrAgentStatus, ipmi::Privilege::Admin,
                           hMdrAgentStatus);
