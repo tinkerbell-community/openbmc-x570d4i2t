@@ -9,3 +9,4 @@ customrc
 *.EXE
 *.zip
 .claude/scheduled_tasks.lock
+compile_commands.json

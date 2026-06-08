@@ -141,9 +141,18 @@ bool triggerMdrSync()
     try
     {
         auto dbus = getSdBus();
+        // Check if the MDR V2 service exists before making a blocking call.
+        // ipmi::getService() throws if the service is not found, and that
+        // exception is cheap (a NameHasNoOwner D-Bus error, not a 25s timeout).
         std::string service =
             ipmi::getService(*dbus, "xyz.openbmc_project.Smbios.MDR_V2",
                              "/xyz/openbmc_project/Smbios/MDR_V2");
+        if (service.empty())
+        {
+            phosphor::logging::log<phosphor::logging::level::WARNING>(
+                "ami::triggerMdrSync: smbios-mdrv2 service not found, skipping");
+            return false;
+        }
         sdbusplus::message_t method =
             dbus->new_method_call(service.c_str(),
                                   "/xyz/openbmc_project/Smbios/MDR_V2",
@@ -156,8 +165,8 @@ bool triggerMdrSync()
     }
     catch (const std::exception& e)
     {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-            "ami::triggerMdrSync: D-Bus call failed",
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "ami::triggerMdrSync: D-Bus call failed (service may not be ready)",
             phosphor::logging::entry("ERROR=%s", e.what()));
         return false;
     }

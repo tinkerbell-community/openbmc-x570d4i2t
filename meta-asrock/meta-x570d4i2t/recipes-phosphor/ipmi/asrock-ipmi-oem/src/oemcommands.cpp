@@ -1001,6 +1001,14 @@ static ipmi::RspType<std::vector<uint8_t>>
     else if (req.size() >= 2)
         declared = req[1];
 
+    if (declared > ami::kMaxPayload)
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "MDR 0x51 WriteBegin: declared > kMaxPayload, capping",
+            phosphor::logging::entry("DECLARED=%u", declared),
+            phosphor::logging::entry("CAP=%u", ami::kMaxPayload));
+        declared = ami::kMaxPayload;
+    }
     g_oemWriteBuf.clear();
     if (declared) g_oemWriteBuf.reserve(declared);
     g_oemDeclared = declared;
@@ -1047,6 +1055,15 @@ static ipmi::RspType<std::vector<uint8_t>>
     }
 
     size_t needed = static_cast<size_t>(offset) + payloadSz;
+    if (needed > ami::kMaxPayload)
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+            "MDR 0x52 WriteChunk: oversized, rejecting",
+            phosphor::logging::entry("OFFSET=0x%04X", offset),
+            phosphor::logging::entry("PAYLOAD=%zu", payloadSz),
+            phosphor::logging::entry("NEEDED=%zu", needed));
+        return ipmi::responseReqDataLenInvalid();
+    }
     if (needed > g_oemWriteBuf.size())
         g_oemWriteBuf.resize(needed, 0);
     std::copy(req.begin() + 3, req.end(), g_oemWriteBuf.begin() + offset);
