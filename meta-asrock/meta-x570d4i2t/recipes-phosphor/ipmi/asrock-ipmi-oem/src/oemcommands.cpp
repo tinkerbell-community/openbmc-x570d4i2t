@@ -628,55 +628,55 @@ static void registerOEMFunctions()
 
     // AMI inventory (0xE6) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetInventory),
                           ipmi::Privilege::User, ipmiGetInventory);
 
     // Sensor info (0x1E) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetSensorInfo),
                           ipmi::Privilege::User, ipmiGetSensorInfo);
 
     // Firmware version (0x20) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetFwVersion),
                           ipmi::Privilege::User, ipmiGetFwVersion);
 
     // Firmware protocol (0x21) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetFwProtocol),
                           ipmi::Privilege::User, ipmiGetFwProtocol);
 
     // BMC config management (0x2B) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdManageBmcConfig),
                           ipmi::Privilege::User, ipmiManageBmcConfig);
 
     // SEL policy get (0x30) — Admin
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetSelPolicy),
                           ipmi::Privilege::Admin, ipmiGetSelPolicy);
 
     // KVM mux switching (0xEE) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdMuxSwitching),
                           ipmi::Privilege::User, ipmiMuxSwitching);
 
     // PECI read/write (0xE9) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdPeciReadWrite),
                           ipmi::Privilege::User, ipmiPeciReadWrite);
 
     // PSU info (0xEC) — User
     ipmi::registerHandler(ipmi::prioOemBase,
-                          static_cast<ipmi::NetFn>(netFnGeneral),
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdPsuInfo),
                           ipmi::Privilege::User, ipmiPsuInfo);
 
@@ -685,7 +685,7 @@ static void registerOEMFunctions()
          cmd <= general::cmdYafuEraseCopyFlash; ++cmd)
     {
         ipmi::registerHandler(ipmi::prioOemBase,
-                              static_cast<ipmi::NetFn>(netFnGeneral),
+                              static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                               static_cast<ipmi::Cmd>(cmd),
                               ipmi::Privilege::Admin, ipmiYafuStub);
     }
