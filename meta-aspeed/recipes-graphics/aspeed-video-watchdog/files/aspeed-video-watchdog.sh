@@ -17,7 +17,16 @@ log() { logger -t aspeed-video-watchdog "$*"; }
 find_video_dev() {
     # Symlink names look like "1e700000.video"; skip the driver control
     # files which are plain alpha names (bind, unbind, uevent, …).
-    ls "$DRIVER/" 2>/dev/null | grep -E '^[0-9a-f]+\.' | head -1
+    for path in "$DRIVER"/*.*; do
+        [ -e "$path" ] || continue
+        name=${path##*/}
+        case "$name" in
+            [0-9a-f]*.*)
+                printf '%s\n' "$name"
+                return 0
+                ;;
+        esac
+    done
 }
 
 reset_driver() {

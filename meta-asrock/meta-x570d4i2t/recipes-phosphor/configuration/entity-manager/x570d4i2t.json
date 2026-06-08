@@ -187,6 +187,17 @@
         },
 
         {
+            "_comment": "PSU_SMB1 header (p.6 No.5): i2c2 is the PSU SMBus per AMI IPMI.conf. ALERT# → GPIO G6 (input-psu-smb-alert-n). PSUPresence scans 0x58/0x59 (standard ATX PMBus ADDR=GND) and creates psusensor entries when a PMBus PSU is connected.",
+            "Addresses": [
+                "0x58",
+                "0x59"
+            ],
+            "Bus": 2,
+            "Name": "PSU",
+            "Type": "PSUPresence"
+        },
+
+        {
             "Address": "0x4F",
             "Bus": 4,
             "Name": "Aux Temp",

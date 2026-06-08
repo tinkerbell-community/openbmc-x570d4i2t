@@ -973,9 +973,9 @@ static ipmi::RspType<std::vector<uint8_t>>
         phosphor::logging::entry("BUF_BYTES=%zu", g_oemWriteBuf.size()));
 
     // [status, maxChunkLo, maxChunkHi, mdrVer]
-    // status 0x00 = "has data" / 0x01 = "need data"
-    auto cached = ami::loadMdrPayload();
-    uint8_t status = cached.empty() ? 0x01 : 0x00;
+    // status 0x01 = "need data" until BIOS completes WriteEnd with real table
+    // status 0x00 = "has data" after BIOS has successfully pushed SMBIOS
+    uint8_t status = g_hasBiosPushedSmbios ? 0x00 : 0x01;
     std::vector<uint8_t> rsp = {status, 0x00, 0x10, 0x01};
 
     phosphor::logging::log<phosphor::logging::level::INFO>(
