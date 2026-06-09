@@ -44,6 +44,16 @@ reset_driver() {
     log "link severed — stopping obmc-ikvm and resetting aspeed-video"
     systemctl stop obmc-ikvm.service 2>/dev/null || true
 
+    # Re-assert the AST2500 host VGA PCIe function (SCU PCIE_CONF VGA_EN).
+    # A link-sever often follows a host/SoC event that can drop the host's
+    # view of the onboard VGA (1a03:2000); re-running the vga-enable oneshot
+    # re-connects the PCIe VGA device before we rebind the capture engine, so
+    # the host has a signal to capture. Harmless if VGA_EN was already set.
+    if [ -x /usr/libexec/x570d4i2t-vga-enable.sh ]; then
+        log "re-asserting host VGA PCIe enable (VGA_EN)"
+        /usr/libexec/x570d4i2t-vga-enable.sh 2>/dev/null || true
+    fi
+
     if lsmod 2>/dev/null | grep -q '^aspeed_video '; then
         modprobe -r aspeed_video 2>/dev/null || true
         sleep 1
@@ -69,10 +79,12 @@ reset_driver() {
 log "started — monitoring obmc-ikvm for video link failures"
 
 # Follow the obmc-ikvm unit journal.  --no-hostname -o cat keeps lines
-# clean.  grep --line-buffered ensures we act on each match immediately
-# rather than waiting for a full buffer.
+# clean.  Match inside the read loop with a case glob instead of
+# `grep --line-buffered` (a GNU-only option BusyBox grep rejects, which
+# made this script exit immediately and trip the systemd start-limit).
 journalctl -f -u obmc-ikvm.service --no-hostname -o cat 2>/dev/null | \
-    grep --line-buffered "Link has been severed" | \
-    while read -r _line; do
-        reset_driver
+    while read -r line; do
+        case "$line" in
+            *"Link has been severed"*) reset_driver ;;
+        esac
     done

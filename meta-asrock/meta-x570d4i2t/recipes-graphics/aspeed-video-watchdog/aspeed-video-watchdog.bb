@@ -31,5 +31,9 @@ FILES:${PN} += " \
     ${systemd_system_unitdir}/aspeed-video-watchdog.service \
 "
 
-# journalctl, grep, logger, lsmod, modprobe, sleep — all from busybox.
+# journalctl, logger, lsmod, modprobe, sleep — all from busybox.
 RDEPENDS:${PN} += "busybox"
+
+# The reset path re-asserts the host VGA PCIe function via the vga-enable
+# oneshot's script (/usr/libexec/x570d4i2t-vga-enable.sh).
+RDEPENDS:${PN} += "x570d4i2t-vga-enable"
