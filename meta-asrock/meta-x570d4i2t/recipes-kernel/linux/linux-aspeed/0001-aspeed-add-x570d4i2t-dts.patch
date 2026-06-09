@@ -29,8 +29,8 @@ phosphor-led-manager led-group-config.json to target them by name.
 Signed-off-by: ASRock OpenBMC port <noreply@example.com>
 ---
  arch/arm/boot/dts/aspeed/Makefile                  |   1 +
- .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 437 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 438 insertions(+)
+ .../boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts | 445 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 446 insertions(+)
  create mode 100644 arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
 
 diff --git a/arch/arm/boot/dts/aspeed/Makefile b/arch/arm/boot/dts/aspeed/Makefile
@@ -48,7 +48,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,445 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -331,7 +331,15 @@ new file mode 100644
 +	status = "okay";
 +
 +	nct75@4f {
-+		compatible = "nuvoton,nct75";
++		/*
++		 * The NCT75 is LM75-register-compatible, but the kernel lm75
++		 * driver's match tables (6.18) have no "nuvoton,nct75" entry —
++		 * with only that compatible the driver never binds, no hwmon
++		 * appears, and the entity-manager "Aux Temp" (NCT75 @ bus4 0x4f)
++		 * sensor silently goes missing. Add the generic "national,lm75"
++		 * fallback (in the lm75 of_match table) so the driver binds.
++		 */
++		compatible = "nuvoton,nct75", "national,lm75";
 +		reg = <0x4f>;
 +	};
 +};
