@@ -1,14 +1,12 @@
-# X570D4I-2T: publish two constant fan_tach virtual sensors.
+# X570D4I-2T: no virtual sensors (empty config).
 #
-# phosphor-pid-control's "fan" PID class refuses to leave failsafe (PWM=100%)
-# unless every tach Input publishes a valid reading, and it ignores
-# MissingIsAcceptable / InputUnavailableAsFailed for that class. This board's
-# fan headers don't wire tach back to the AST2500, so we feed swampd two
-# constant 1500 RPM readings via phosphor-virtual-sensor (constant exprtk
-# expression, no D-Bus inputs). These publish at
-# /xyz/openbmc_project/sensors/fan_tach/{FanTach_CPU,FanTach_Chassis}, which is
-# exactly where the Pid "Inputs" resolve. This replaces the fake-tach loop that
-# used to live in nct6779-bridge.
+# This previously published two constant fan_tach values to keep swampd's fan
+# PID out of failsafe. But the board's fans are 3-wire and driven by the host
+# NCT6779 SmartFan (the AST2500 PWM/tach is not in the fan path), and swampd
+# isn't installed on this image anyway, so the AST AspeedFan/PID loop was
+# removed. Fan duty + SuperIO temps are now surfaced read-only by nct6779-bridge
+# -> ExternalSensor instead. The empty config is kept so the recipe still owns
+# the path; add virtual-sensor stanzas here if a real derived sensor is needed.
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
 SRC_URI:append = " file://config-virtual-sensor.json"
