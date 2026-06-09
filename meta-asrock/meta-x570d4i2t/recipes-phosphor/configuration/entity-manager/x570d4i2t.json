@@ -214,7 +214,8 @@
                 {"Direction": "greater than", "Name": "upper critical", "Severity": 1, "Value": 85},
                 {"Direction": "greater than", "Name": "upper non critical", "Severity": 0, "Value": 75}
             ],
-            "Type": "NCT75"
+            "_comment": "Physical part is a Nuvoton NCT75 (LM75-register-compatible; kernel binds it via lm75/national,lm75). dbus-sensors and EntityManager have no NCT75 type (EM drops the unknown type), so use the supported LM75-family type TMP75 - HwmonTempSensor matches by I2C bus/address, not by hwmon name.",
+            "Type": "TMP75"
         },
 
         {
