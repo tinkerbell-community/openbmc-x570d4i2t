@@ -404,7 +404,7 @@ new file mode 100644
 +};
 +
 +&vhub {
-+	/* USB-NCM host-BMC tunnel */
++	/* USB 2.0 virtual hub UDC (virtual media); no USB-NCM/RHI gadget */
 +	status = "okay";
 +};
 +

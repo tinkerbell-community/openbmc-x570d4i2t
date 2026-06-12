@@ -16,8 +16,9 @@ Provides: \
 \
 SMBIOS is received over IPMI (AMI MDR: NetFn 0x3A 0xB5 SetSmbiosChunk + \
 NetFn 0x32 0x5D LegacyCtrl), handled here and synthesized from FRU/SPD into \
-smbios-mdrv2; BIOS configuration is over the Redfish Host Interface \
-(bmcweb 0002 patch -> xyz.openbmc_project.BIOSConfigManager). \
+smbios-mdrv2. BIOS configuration has no host-push path on this board (the USB \
+Redfish Host Interface approach was removed); the stock bmcweb /Bios routes \
+are served from xyz.openbmc_project.BIOSConfigManager. \
 "
 
 LICENSE = "Apache-2.0"

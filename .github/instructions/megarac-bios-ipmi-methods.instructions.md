@@ -36,45 +36,37 @@ The AST2500 exposes three KCS (Keyboard Controller Style) channels used for in-b
 
 ## 2. BIOS Configuration Protocol
 
-### 2.1 Overview — this board uses the Redfish Host Interface, NOT IPMI
+### 2.1 Overview — host BIOS-config push is NOT implemented on this board
 
-> **CORRECTION (verified against AMI firmware v01.91.00 decompiled Lua +
-> boot-time KCS capture):** the X570D4I-2T AMI Aptio BIOS does **NOT** push
-> BIOS setup data over IPMI. It pushes over the in-band **Redfish Host
-> Interface** (USB-NIC, authenticating as the `HostAutoFW` user). The
-> Intel-style IPMI OOB payload commands described in §2.2–§2.7 below
-> (`SetBIOSCap`/`GetBIOSCap`/`SetPayload`/`GetPayload`) are **never issued by
-> this firmware** and the handlers that implemented them have been **removed**
-> from `asrock-ipmi-oem` (was `src/biosconfig.cpp`). §2.2–§2.7 are retained
-> only as a historical reference to the protocol intel-ipmi-oem implements.
+> **STATUS (current):** the in-band **Redfish Host Interface** (USB-NIC) approach
+> for receiving BIOS config from the host has been **removed entirely** from this
+> layer — the USB network gadget, the `HostAutoFW` user, and the bmcweb OEM
+> routes (`0002-asrock-bios-host-interface.patch`) are all gone. The IPMI OOB
+> payload commands described in §2.2–§2.7 (`SetBIOSCap`/`GetBIOSCap`/
+> `SetPayload`/`GetPayload`) are **never issued by this firmware** and were also
+> removed (was `src/biosconfig.cpp`). **There is currently no host-push path for
+> BIOS configuration on this board.**
+>
+> `biosconfig-manager` is still installed, so the stock bmcweb Redfish BIOS
+> endpoints exist and are served from `xyz.openbmc_project.BIOSConfigManager`
+> (`BaseBIOSTable` / `PendingAttributes`) — but the store is empty until a
+> populator is wired up. §2.2–§2.7 below are retained only as a historical
+> reference to the IPMI protocol intel-ipmi-oem implements.
 
-**Actual mechanism (host BIOS → BMC, all over the Redfish Host Interface):**
+For reference, the AMI firmware's host-interface mechanism (decompiled Lua
+v01.91.00, `registry-collection-hi.lua` / `bios-hi.lua`) was:
 
 ```
 BIOS → POST /redfish/v1/Registries             (DMTF BIOS Attribute Registry)
-                                                 → BaseBIOSTable (definitions + defaults)
 BIOS → POST /redfish/v1/Systems/<id>/Bios       (current values)
-                                                 → BaseBIOSTable current fields; clears pending
-user → PATCH /redfish/v1/Systems/<id>/Bios/SD    (stage a change)        ┐ both names
-user → PATCH /redfish/v1/Systems/<id>/Bios/Settings                       ┘ → PendingAttributes
+user → PATCH /redfish/v1/Systems/<id>/Bios/SD    (stage a change; AMI names it "SD", not "Settings")
 BIOS → GET  /redfish/v1/Systems/<id>/Bios/SD     (read staged values, apply on next boot)
 ```
 
-The store is `xyz.openbmc_project.BIOSConfigManager`
-(`/xyz/openbmc_project/bios_config/manager`), `BaseBIOSTable` /
-`PendingAttributes`. bmcweb serves it at `/redfish/v1/Systems/<id>/Bios`.
-
-> **Critical URI note:** the AMI host BIOS firmware names its pending/settings
-> resource **`SD`** (`.../Bios/SD`), not the DMTF `Settings`. The bmcweb OEM
-> routes register **both** aliases against the one `PendingAttributes` store.
-> Serving only `/Bios/Settings` makes the BIOS GET 404 and silently breaks the
-> entire stage-then-apply control loop.
-
-**Implementation:** `recipes-phosphor/interfaces/bmcweb/0002-asrock-bios-host-interface.patch`
-(routes + DMTF-registry → `BaseBIOSTable` conversion), mirroring the AMI Lua
-handlers `registry-collection-hi.lua` / `bios-hi.lua`. This is **BIOS config
-only** — SMBIOS does NOT use the Redfish Host Interface; it arrives over IPMI
-(AMI-MDR) and is handled in `asrock-ipmi-oem` (see §3.1).
+If this path is ever re-implemented, note the AMI firmware names its pending
+resource **`SD`** (`.../Bios/SD`), not the DMTF `Settings`. SMBIOS does **not**
+use this interface — it arrives over IPMI (AMI-MDR) and is handled in
+`asrock-ipmi-oem` (see §3.1).
 
 ### 2.2 Command Codes
 

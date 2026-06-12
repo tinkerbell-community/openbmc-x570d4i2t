@@ -293,7 +293,8 @@
 };
 
 &vhub {
-	/* USB-NCM host-BMC tunnel */
+	/* USB 2.0 virtual hub — UDC for the configfs virtual-media gadget.
+	 * No USB network / Redfish-Host-Interface gadget is configured. */
 	status = "okay";
 };
 

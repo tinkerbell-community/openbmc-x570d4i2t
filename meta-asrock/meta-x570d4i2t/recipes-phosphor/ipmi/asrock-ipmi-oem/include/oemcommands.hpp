@@ -12,10 +12,12 @@
 //   - Board-info and sensor-info commands
 //   - KVM mux, PECI, and PSU OEM handlers
 //
-// SMBIOS and BIOS configuration are NOT carried over IPMI on this board — the
-// AMI host BIOS pushes both over the Redfish Host Interface (see the bmcweb
-// 0001/0002 asrock host-interface patches). The corresponding IPMI handlers
-// were removed; only the NetFn 0x3A OEM commands below remain.
+// SMBIOS IS carried over IPMI on this board: the AMI host BIOS pushes SMBIOS
+// fragments via the AMI-MDR command set (NetFn 0x3A 0xB5 SetSmbiosChunk / 0xB2,
+// NetFn 0x32 0x5D LegacyCtrl), handled here; the BMC synthesizes the table from
+// FRU/SPD. BIOS configuration is served by stock bmcweb /Bios routes backed by
+// BIOSConfigManager — there is NO host-push path (the USB Redfish Host
+// Interface approach and its bmcweb OEM patches were removed entirely).
 //
 // Command codes are sourced from:
 //   - Confirmed g_AMI_CmdHndlr table extraction (bmc-analyze.instructions.md)
@@ -42,13 +44,12 @@ namespace asrock
 namespace general
 {
 
-// NOTE: BIOS configuration is NOT done over IPMI on this board.  The AMI
-// Aptio host BIOS pushes its attribute registry + current/pending values over
-// the in-band Redfish Host Interface (see the bmcweb 0002-asrock-bios-host-
-// interface patch -> xyz.openbmc_project.BIOSConfigManager).  The Intel-style
+// NOTE: BIOS configuration has no host-push path on this board.  The Intel-style
 // IPMI OOB payload commands (SetBIOSCap/GetBIOSCap/SetPayload/GetPayload) that
 // once lived here were removed: this firmware never issues them (verified by
-// boot-time KCS capture).
+// boot-time KCS capture).  The AMI in-band Redfish Host Interface push path was
+// also removed entirely (USB gadget + bmcweb OEM routes).  The stock bmcweb
+// /Bios routes remain, backed by xyz.openbmc_project.BIOSConfigManager (empty).
 
 // ------------------------------------------------------------------
 // AMI YAFU (firmware upload) — codes 0x01–0x10
@@ -142,12 +143,12 @@ static constexpr uint8_t cmdPsuInfo  = 0xEC; // priv 0xFF (User-visible)
 
 } // namespace general
 
-// NOTE: SMBIOS transfer is NOT done over IPMI on this board.  The AMI host
-// BIOS pushes its SMBIOS table over the in-band Redfish Host Interface
-// (POST /redfish/v1/Systems/<id>/Smbios -> /var/lib/smbios/smbios2 ->
-// smbios-mdrv2 AgentSynchronizeData; see the bmcweb 0001-asrock-smbios-host-
-// interface-push patch).  The former IPMI MDR2 (NetFn 0x3E) and AMI-MDR
-// (NetFn 0x3A) command codes and handlers were removed — this firmware never
-// issues them (verified by boot-time KCS capture).
+// NOTE: SMBIOS IS received over IPMI on this board, via the AMI-MDR command
+// set — NetFn 0x3A 0xB5 SetSmbiosChunk / 0xB2, NetFn 0x32 0x5D LegacyCtrl —
+// handled in src/oemcommands.cpp (see amiconverter.{cpp,hpp}).  The BMC
+// accumulates the host-pushed fragments and synthesizes the SMBIOS table from
+// FRU/SPD, writes /var/lib/smbios/smbios2, then calls smbios-mdrv2
+// AgentSynchronizeData.  The standard IPMI MDR2 (NetFn 0x3E) path is NOT used —
+// this firmware never issues it (verified by live busctl capture).
 
 } // namespace asrock
