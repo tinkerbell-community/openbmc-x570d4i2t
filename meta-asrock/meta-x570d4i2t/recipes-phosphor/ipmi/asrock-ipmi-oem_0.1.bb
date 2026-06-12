@@ -29,7 +29,11 @@ SRC_URI = " \
     file://meson.options \
     file://include/amiconverter.hpp \
     file://include/oemcommands.hpp \
+    file://include/spdreader.hpp \
+    file://include/smbiosbuilder.hpp \
     file://src/amiconverter.cpp \
+    file://src/spdreader.cpp \
+    file://src/smbiosbuilder.cpp \
     file://src/appcommands.cpp \
     file://src/chassiscommands.cpp \
     file://src/oemcommands.cpp \

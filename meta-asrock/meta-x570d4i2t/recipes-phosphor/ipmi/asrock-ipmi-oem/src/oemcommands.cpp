@@ -26,6 +26,7 @@
 
 #include <oemcommands.hpp>
 #include <amiconverter.hpp>
+#include <smbiosbuilder.hpp>
 
 #include <ipmid/api.hpp>
 #include <ipmid/message.hpp>
@@ -1112,6 +1113,28 @@ static ipmi::RspType<std::vector<uint8_t>>
     return ipmi::responseSuccess(std::vector<uint8_t>{});
 }
 
+// Synthesize the SMBIOS table (host fields + FRU + SPD + static) and persist
+// it as MDR V2 for smbios-mdr + the BIOS's 0x72 GetBlock read-back.
+static bool rebuildAndPersistSmbios()
+{
+    std::vector<uint8_t> table = smbiosbuild::buildSmbiosTable();
+    if (table.empty())
+    {
+        phosphor::logging::log<phosphor::logging::level::WARNING>(
+            "rebuildAndPersistSmbios: empty table, skipping");
+        return false;
+    }
+    if (!ami::writeMdrFile(table.data(), table.size()))
+    {
+        return false;
+    }
+    ami::triggerMdrSync();
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+        "rebuildAndPersistSmbios: SMBIOS synthesized + synced",
+        phosphor::logging::entry("BYTES=%zu", table.size()));
+    return true;
+}
+
 // ── 0x5D LegacyCtrl (two-phase begin/end) ───────────────────────────────
 static ipmi::RspType<std::vector<uint8_t>>
     ipmiMdrLegacyCtrl(ipmi::Context::ptr& /*ctx*/,
@@ -1140,6 +1163,8 @@ static ipmi::RspType<std::vector<uint8_t>>
             phosphor::logging::entry("ACCUM_BYTES=%zu", g_oemWriteBuf.size()));
         if (!g_oemWriteBuf.empty())
         {
+            // Host actually streamed a full table (not seen on this BIOS, but
+            // honor it if it ever does): persist the raw buffer verbatim.
             phosphor::logging::log<phosphor::logging::level::INFO>(
                 "MDR 0x5D payload head",
                 phosphor::logging::entry("HEAD_HEX=%s", mdrHex(g_oemWriteBuf).c_str()));
@@ -1149,6 +1174,16 @@ static ipmi::RspType<std::vector<uint8_t>>
                 g_hasBiosPushedSmbios = true;
             }
             g_oemWriteBuf.clear();
+        }
+        else
+        {
+            // Normal path: the BIOS only pushed OEM fields (0xB2 version,
+            // 0xB5 board name) and now commits. Synthesize the full table
+            // from those fields + FRU + DDR4 SPD + static board constants.
+            if (rebuildAndPersistSmbios())
+            {
+                g_hasBiosPushedSmbios = true;
+            }
         }
         g_oemState    = OemMdrState::Idle;
         g_oemDeclared = 0;
@@ -1342,11 +1377,18 @@ static ipmi::RspType<std::vector<uint8_t>>
         else
             snprintf(ver, sizeof(ver), "%u.%u%u",   major, minorHi, minorLo);
 
+        // Date bytes (req[4..7]) are BCD-ish month/day/year; format best-effort.
+        char date[16];
+        snprintf(date, sizeof(date), "%02X/%02X/20%02X", req[4], req[5], req[7]);
+
         phosphor::logging::log<phosphor::logging::level::INFO>(
             "AMI 0xB2 SetBiosInfo decoded",
             phosphor::logging::entry("VERSION=%s", ver),
             phosphor::logging::entry("DATE_BCD=%02X/%02X/%02X%02X",
                 req[4], req[5], req[6], req[7]));
+
+        // Capture for SMBIOS Type 0 synthesis.
+        smbiosbuild::setHostBios(ver, date);
     }
     return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
 }
@@ -1373,6 +1415,9 @@ static ipmi::RspType<std::vector<uint8_t>>
             "AMI 0xB5 SetSmbiosChunk string",
             phosphor::logging::entry("VALUE=%s", s.c_str()),
             phosphor::logging::entry("LEN=%zu", s.size()));
+
+        // Capture the board/product name for SMBIOS Type 1/2 synthesis.
+        smbiosbuild::setHostBoardName(s);
     }
     return ipmi::responseSuccess(std::vector<uint8_t>{0x01});
 }
