@@ -171,71 +171,111 @@ std::vector<DimmInfo> readAllDimms(int bus, uint8_t base, int count)
         return out;
     }
 
+    // i2c-7 is shared (FRU EEPROM + hwmon sensors) and the EE1004 page-select
+    // (SPA0/SPA1) is GLOBAL bus state, so a concurrent transaction can corrupt
+    // a multi-step SPD read. Retry each DIMM until the read is self-consistent
+    // (byte 2 == DDR4 and the page-1 part number is printable).
+    constexpr int kReadRetries = 6;
+
     for (int i = 0; i < count; ++i)
     {
         DimmInfo d;
         d.slotIndex = static_cast<uint8_t>(i);
         d.spdAddr   = static_cast<uint8_t>(base + i);
 
-        // --- page 0: presence + geometry ---
-        selectPage(fd, 0);
-        uint8_t memType = 0;
-        if (!readAt(fd, d.spdAddr, kP0MemType, &memType, 1) ||
-            memType != kSpdMemTypeDDR4)
+        bool decoded = false;
+        for (int attempt = 0; attempt < kReadRetries && !decoded; ++attempt)
         {
-            out.push_back(d); // present=false
-            continue;
-        }
-        d.present = true;
+            // --- page 0: presence + geometry ---
+            selectPage(fd, 0);
+            uint8_t memType = 0;
+            if (!readAt(fd, d.spdAddr, kP0MemType, &memType, 1))
+            {
+                continue; // transient bus error -> retry
+            }
+            if (memType != kSpdMemTypeDDR4)
+            {
+                break;    // genuinely empty / not DDR4 -> leave present=false
+            }
 
-        uint8_t density = 0, org = 0, busw = 0, mtb = 0;
-        int8_t  ftb = 0;
-        readAt(fd, d.spdAddr, kP0Density, &density, 1);
-        readAt(fd, d.spdAddr, kP0ModuleOrg, &org, 1);
-        readAt(fd, d.spdAddr, kP0BusWidth, &busw, 1);
-        readAt(fd, d.spdAddr, kP0MtbTckMin, &mtb, 1);
-        readAt(fd, d.spdAddr, kP0FineTckMin,
-               reinterpret_cast<uint8_t*>(&ftb), 1);
+            uint8_t density = 0, org = 0, busw = 0, mtb = 0;
+            int8_t  ftb = 0;
+            readAt(fd, d.spdAddr, kP0Density, &density, 1);
+            readAt(fd, d.spdAddr, kP0ModuleOrg, &org, 1);
+            readAt(fd, d.spdAddr, kP0BusWidth, &busw, 1);
+            readAt(fd, d.spdAddr, kP0MtbTckMin, &mtb, 1);
+            readAt(fd, d.spdAddr, kP0FineTckMin,
+                   reinterpret_cast<uint8_t*>(&ftb), 1);
 
-        d.deviceWidth  = (org & 0x07) <= 3 ? (4u << (org & 0x07)) : 0;
-        d.ranks        = static_cast<uint8_t>(((org >> 3) & 0x07) + 1);
-        d.busWidthBits = (busw & 0x07) <= 3 ? (8u << (busw & 0x07)) : 0;
-        d.ecc          = ((busw >> 3) & 0x07) != 0; // bus width extension bits
-        d.sizeMiB      = ddr4ModuleSizeMiB(density, org, busw);
-        d.speedMTs     = ddr4SpeedMTs(mtb, ftb);
+            // --- page 1: manufacturer / serial / part ---
+            selectPage(fd, 1);
+            uint8_t mfr[2] = {0, 0};
+            uint8_t ser[4] = {0};
+            uint8_t part[kPartLen] = {0};
+            bool gotMfr  = readAt(fd, d.spdAddr, kP1MfrBankOff, mfr, 2);
+            bool gotSer  = readAt(fd, d.spdAddr, kP1SerialOff, ser, 4);
+            bool gotPart = readAt(fd, d.spdAddr, kP1PartOff, part, kPartLen);
+            selectPage(fd, 0); // leave the bus on page 0
 
-        // --- page 1: manufacturer / serial / part ---
-        selectPage(fd, 1);
-        uint8_t mfr[2] = {0, 0};
-        if (readAt(fd, d.spdAddr, kP1MfrBankOff, mfr, 2))
-        {
-            d.jedecMfrId   = static_cast<uint16_t>((mfr[0] << 8) | mfr[1]);
-            d.manufacturer = decodeJedecManufacturer(mfr[0], mfr[1]);
-        }
-        uint8_t ser[4] = {0};
-        if (readAt(fd, d.spdAddr, kP1SerialOff, ser, 4))
-        {
-            char sbuf[9];
-            std::snprintf(sbuf, sizeof(sbuf), "%02X%02X%02X%02X",
-                          ser[0], ser[1], ser[2], ser[3]);
-            d.serial = sbuf;
-        }
-        uint8_t part[kPartLen] = {0};
-        if (readAt(fd, d.spdAddr, kP1PartOff, part, kPartLen))
-        {
+            // Validate the page-1 read integrity: a real part number starts
+            // with a printable char and contains no control bytes (a corrupted
+            // page-select read yields garbage / wrong-page data).
             std::string p(reinterpret_cast<char*>(part), kPartLen);
-            // trim trailing spaces / NULs (explicit 2-char set incl. embedded NUL)
             size_t end = p.find_last_not_of(std::string("\0 ", 2));
-            d.partNumber = (end == std::string::npos) ? "" : p.substr(0, end + 1);
-        }
-        selectPage(fd, 0); // leave the bus on page 0
+            std::string trimmed =
+                (end == std::string::npos) ? "" : p.substr(0, end + 1);
+            bool partOk = gotPart && !trimmed.empty() &&
+                          static_cast<unsigned char>(trimmed[0]) >= 0x20;
+            for (unsigned char c : trimmed)
+            {
+                if (c < 0x20 || c >= 0x7f)
+                {
+                    partOk = false;
+                    break;
+                }
+            }
+            if (!partOk)
+            {
+                continue; // corrupted page-1 read -> retry
+            }
 
-        phosphor::logging::log<phosphor::logging::level::INFO>(
-            "spd::readAllDimms: DIMM decoded",
-            phosphor::logging::entry("ADDR=0x%02X", d.spdAddr),
-            phosphor::logging::entry("SIZE_MIB=%u", d.sizeMiB),
-            phosphor::logging::entry("SPEED=%u", d.speedMTs),
-            phosphor::logging::entry("PART=%s", d.partNumber.c_str()));
+            d.present      = true;
+            d.deviceWidth  = (org & 0x07) <= 3 ? (4u << (org & 0x07)) : 0;
+            d.ranks        = static_cast<uint8_t>(((org >> 3) & 0x07) + 1);
+            d.busWidthBits = (busw & 0x07) <= 3 ? (8u << (busw & 0x07)) : 0;
+            d.ecc          = ((busw >> 3) & 0x07) != 0;
+            d.sizeMiB      = ddr4ModuleSizeMiB(density, org, busw);
+            d.speedMTs     = ddr4SpeedMTs(mtb, ftb);
+            if (gotMfr)
+            {
+                d.jedecMfrId   = static_cast<uint16_t>((mfr[0] << 8) | mfr[1]);
+                d.manufacturer = decodeJedecManufacturer(mfr[0], mfr[1]);
+            }
+            if (gotSer)
+            {
+                char sbuf[9];
+                std::snprintf(sbuf, sizeof(sbuf), "%02X%02X%02X%02X",
+                              ser[0], ser[1], ser[2], ser[3]);
+                d.serial = sbuf;
+            }
+            d.partNumber = trimmed;
+            decoded = true;
+
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "spd::readAllDimms: DIMM decoded",
+                phosphor::logging::entry("ADDR=0x%02X", d.spdAddr),
+                phosphor::logging::entry("ATTEMPT=%d", attempt + 1),
+                phosphor::logging::entry("SIZE_MIB=%u", d.sizeMiB),
+                phosphor::logging::entry("SPEED=%u", d.speedMTs),
+                phosphor::logging::entry("PART=%s", d.partNumber.c_str()));
+        }
+
+        if (!decoded && d.spdAddr)
+        {
+            phosphor::logging::log<phosphor::logging::level::INFO>(
+                "spd::readAllDimms: slot empty or unreadable",
+                phosphor::logging::entry("ADDR=0x%02X", d.spdAddr));
+        }
         out.push_back(d);
     }
 

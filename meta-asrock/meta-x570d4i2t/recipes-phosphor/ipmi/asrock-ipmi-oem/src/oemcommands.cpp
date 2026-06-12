@@ -1377,18 +1377,15 @@ static ipmi::RspType<std::vector<uint8_t>>
         else
             snprintf(ver, sizeof(ver), "%u.%u%u",   major, minorHi, minorLo);
 
-        // Date bytes (req[4..7]) are BCD-ish month/day/year; format best-effort.
-        char date[16];
-        snprintf(date, sizeof(date), "%02X/%02X/20%02X", req[4], req[5], req[7]);
-
         phosphor::logging::log<phosphor::logging::level::INFO>(
             "AMI 0xB2 SetBiosInfo decoded",
             phosphor::logging::entry("VERSION=%s", ver),
-            phosphor::logging::entry("DATE_BCD=%02X/%02X/%02X%02X",
+            phosphor::logging::entry("DATE_RAW=%02X %02X %02X %02X",
                 req[4], req[5], req[6], req[7]));
 
-        // Capture for SMBIOS Type 0 synthesis.
-        smbiosbuild::setHostBios(ver, date);
+        // Capture version for SMBIOS Type 0. The 0xB2 date-field encoding is
+        // not yet decoded, so leave the date to the builder's neutral fallback.
+        smbiosbuild::setHostBios(ver, "");
     }
     return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
 }
