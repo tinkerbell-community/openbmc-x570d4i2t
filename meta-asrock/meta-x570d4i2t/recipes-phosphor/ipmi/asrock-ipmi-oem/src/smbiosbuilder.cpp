@@ -462,6 +462,34 @@ std::vector<uint8_t> buildSmbiosTable()
         s.flush(out);
     }
 
+    // ---- SMBIOS 3.0 entry point, appended AFTER the structure table ----
+    // smbios-mdr's checkSMBIOSVersion() searches the whole region for a "_SM_"
+    // or "_SM3_" anchor and reads the version from the entry point. Placing it
+    // here (not at offset 0) keeps the parsers' getSMBIOSTypePtr() walking the
+    // structure table from offset 0, while still satisfying the version check.
+    {
+        uint32_t structTableLen = static_cast<uint32_t>(out.size());
+        size_t epStart = out.size();
+        const char* anchor = "_SM3_";
+        out.insert(out.end(), anchor, anchor + 5); // anchorString[5]
+        out.push_back(0x00);                        // epChecksum (not validated)
+        out.push_back(0x18);                        // epLength = 24
+        out.push_back(0x03);                        // SMBIOS major version
+        out.push_back(0x05);                        // SMBIOS minor version
+        out.push_back(0x00);                        // SMBIOS doc rev
+        out.push_back(0x01);                        // entry point revision
+        out.push_back(0x00);                        // reserved
+        for (int i = 0; i < 4; ++i)                 // structTableMaxSize (u32 LE)
+            out.push_back(static_cast<uint8_t>((structTableLen >> (8 * i)) & 0xFF));
+        for (int i = 0; i < 8; ++i)                 // structTableAddr (u64) = 0
+            out.push_back(0x00);
+        // fix checksum so the entry point byte-sum is 0 (cosmetic; not checked).
+        uint8_t sum = 0;
+        for (size_t i = epStart; i < out.size(); ++i)
+            sum = static_cast<uint8_t>(sum + out[i]);
+        out[epStart + 5] = static_cast<uint8_t>(0x100 - sum);
+    }
+
     log<level::INFO>("smbiosbuild::buildSmbiosTable: assembled",
                      entry("BYTES=%zu", out.size()),
                      entry("DIMMS=%d", populated),
