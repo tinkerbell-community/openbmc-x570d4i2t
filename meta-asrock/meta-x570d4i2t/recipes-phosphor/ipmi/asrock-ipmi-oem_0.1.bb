@@ -14,8 +14,10 @@ Provides: \
     GetFwVersion, MuxSwitching (GPIOJ1), PeciReadWrite stub, PsuInfo, \
     ManageBmcConfig, GetSelPolicy, YAFU stubs (phosphor-ipmi-blobs path) \
 \
-SMBIOS is handled over the Redfish Host Interface (bmcweb 0001 patch \
--> smbios-mdrv2), not IPMI; BIOS configuration likewise (bmcweb 0002 patch). \
+SMBIOS is received over IPMI (AMI MDR: NetFn 0x3A 0xB5 SetSmbiosChunk + \
+NetFn 0x32 0x5D LegacyCtrl), handled here and synthesized from FRU/SPD into \
+smbios-mdrv2; BIOS configuration is over the Redfish Host Interface \
+(bmcweb 0002 patch -> xyz.openbmc_project.BIOSConfigManager). \
 "
 
 LICENSE = "Apache-2.0"
@@ -24,7 +26,9 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://meson.build \
     file://meson.options \
+    file://include/amiconverter.hpp \
     file://include/oemcommands.hpp \
+    file://src/amiconverter.cpp \
     file://src/appcommands.cpp \
     file://src/chassiscommands.cpp \
     file://src/oemcommands.cpp \

@@ -1,5 +1,5 @@
 ---
-description: "Use when implementing, extending, or debugging IPMI OEM command handlers for the X570D4I-2T OpenBMC layer. Covers Megarac/AMI OEM IPMI methods, MDR2 SMBIOS transfer, KCS channels, EFI variable access, D-Bus interfaces, command codes, and wire-format structs. NOTE: BIOS configuration is NOT done over IPMI on this board — it uses the Redfish Host Interface (see §2.1); the IPMI OOB payload protocol is documented only as historical reference."
+description: "Use when implementing, extending, or debugging IPMI OEM command handlers for the X570D4I-2T OpenBMC layer. Covers Megarac/AMI OEM IPMI methods, AMI-MDR SMBIOS transfer (NetFn 0x3A 0xB5/0xB2 + NetFn 0x32 0x5D, synthesized from FRU/SPD), KCS channels, EFI variable access, D-Bus interfaces, command codes, and wire-format structs. NOTE: SMBIOS IS over IPMI here, but BIOS configuration is NOT — BIOS config uses the Redfish Host Interface (see §2.1); the standard MDR2 (NetFn 0x3E) and IPMI BIOS OOB payload protocols are documented only as historical reference."
 applyTo:
   - "meta-asrock/meta-x570d4i2t/recipes-phosphor/ipmi/asrock-ipmi-oem/**"
   - "meta-asrock/meta-x570d4i2t/recipes-phosphor/smbios/**"
@@ -72,8 +72,9 @@ The store is `xyz.openbmc_project.BIOSConfigManager`
 
 **Implementation:** `recipes-phosphor/interfaces/bmcweb/0002-asrock-bios-host-interface.patch`
 (routes + DMTF-registry → `BaseBIOSTable` conversion), mirroring the AMI Lua
-handlers `registry-collection-hi.lua` / `bios-hi.lua`. Companion patch `0001`
-does the same for SMBIOS (`POST /Systems/<id>/Smbios` → smbios-mdrv2).
+handlers `registry-collection-hi.lua` / `bios-hi.lua`. This is **BIOS config
+only** — SMBIOS does NOT use the Redfish Host Interface; it arrives over IPMI
+(AMI-MDR) and is handled in `asrock-ipmi-oem` (see §3.1).
 
 ### 2.2 Command Codes
 
@@ -229,23 +230,28 @@ For `GetPayload` payload type 1 (pending attributes), read `PendingAttributes` f
 
 ### 3.1 How SMBIOS Reaches the BMC
 
-> **CORRECTION (verified against boot-time KCS capture + AMI Lua):** the AMI
-> Aptio BIOS does **NOT** send SMBIOS over IPMI on this board (the capture
-> shows no NetFn 0x3E and ≤18 B payloads — far too small for MDR chunking).
-> It pushes the SMBIOS table over the in-band **Redfish Host Interface**, the
-> same way it pushes BIOS config (§2.1). The IPMI MDR2 (NetFn 0x3E) handler
-> `src/smbiosmdrv2handler.cpp` **and** the AMI-MDR block that had been added to
-> `src/oemcommands.cpp` (NetFn 0x3A, `0xB2`/`0xA0`/`0xB5`/`0x31`/`0x3D`/`0x51`…)
-> were both **removed**. §3.2 below is retained only as a historical reference
-> to the intel-ipmi-oem MDR2 protocol.
+> **CORRECTION (verified against live `busctl` IPMI capture + decompiled
+> `libipmimsghndlr.so`):** the AMI Aptio BIOS sends SMBIOS over **IPMI**, using
+> the proprietary **AMI-MDR** command set — *not* standard MDR2 (NetFn 0x3E) and
+> *not* the Redfish Host Interface. The capture shows only short OEM
+> string/field fragments (e.g. board name `X570D4I-2T`); the BIOS does **not**
+> push a full SMBIOS table over any transport. The BMC **synthesizes** the table
+> from FRU EEPROM + DIMM SPD and merges the host-pushed fragments.
+>
+> AMI-MDR commands are handled in `asrock-ipmi-oem` `src/oemcommands.cpp`:
+> `0xB5` SetSmbiosChunk (NetFn 0x3A), `0xB2` (BIOS info), `0x5D` LegacyCtrl
+> (NetFn 0x32). The standard MDR2 (NetFn 0x3E) handler
+> `src/smbiosmdrv2handler.cpp` is **not** built — the BIOS never sends those.
+> §3.2 below is retained only as a historical reference to the intel-ipmi-oem
+> MDR2 protocol (a path this BIOS does not use).
 
-**Actual mechanism:** the host BIOS does
-`POST /redfish/v1/Systems/<id>/Smbios` (raw SMBIOS table, multipart) over the
-Redfish Host Interface. The bmcweb OEM handler
-(`0001-asrock-smbios-host-interface-push.patch`):
+**Actual mechanism:** the host BIOS pushes OEM SMBIOS string fragments via the
+AMI-MDR IPMI commands above. `asrock-ipmi-oem`:
 
-1. Prepends the phosphor-smbios-mdr `MDRSMBIOSHeader` (dirVer=1, mdrType=2).
-2. Writes the result to `/var/lib/smbios/smbios2`.
+1. Accumulates the host-pushed fragments and synthesizes a full SMBIOS table
+   from FRU EEPROM + DIMM SPD (`populateSmbiosFromFru` / `amiconverter`).
+2. Writes the result (with phosphor-smbios-mdr `MDRSMBIOSHeader`, dirVer=1,
+   mdrType=2) to `/var/lib/smbios/smbios2`.
 3. Calls `xyz.openbmc_project.Smbios.MDR_V2` / `AgentSynchronizeData()` so
    `smbiosmdrv2app` re-parses the table and re-populates D-Bus inventory.
 
@@ -361,20 +367,23 @@ recipes-phosphor/ipmi/
     ├── meson.build                  # Builds libzasrockoemcmds.so → ${libdir}/ipmid-providers/
     ├── meson.options                # Feature flags (tests disabled by default)
     ├── include/
+    │   ├── amiconverter.hpp         # AMI-MDR SMBIOS fragment → table helpers
     │   └── oemcommands.hpp          # NetFn/command codes (general namespace)
     └── src/
+        ├── amiconverter.cpp         # AMI-MDR SMBIOS synthesis (FRU/SPD + fragments)
         ├── appcommands.cpp          # App NetFn overrides (GetDeviceId, GetSystemGuid)
         ├── chassiscommands.cpp      # Chassis NetFn overrides
-        ├── oemcommands.cpp          # GetBoardInfo + AMI NetFn 0x30 OEM handlers
+        ├── oemcommands.cpp          # GetBoardInfo + AMI NetFn 0x30 OEM + AMI-MDR SMBIOS (0xB5/0xB2/0x5D)
         ├── sensorcommands.cpp       # PlatformEvent override
         └── storagecommands.cpp      # SEL NetFn overrides
 ```
 
-> Both BIOS configuration (§2.1) and SMBIOS (§3.1) are handled in bmcweb over
-> the Redfish Host Interface, not here. The former IPMI handlers
-> `biosconfig.{cpp,hpp}` (BIOS OOB payload), `smbiosmdrv2handler.cpp` (MDR2),
-> the AMI-MDR block in `oemcommands.cpp`, and `amiconverter.{cpp,hpp}` were all
-> removed.
+> SMBIOS (§3.1) IS handled here, over IPMI (AMI-MDR: NetFn 0x3A `0xB5`/`0xB2`,
+> NetFn 0x32 `0x5D`) — the BMC synthesizes the table from FRU/SPD. Only **BIOS
+> configuration** (§2.1) is in bmcweb over the Redfish Host Interface. The
+> standard MDR2 handler `smbiosmdrv2handler.cpp` (NetFn 0x3E) and the IPMI BIOS
+> OOB payload handlers `biosconfig.{cpp,hpp}` are **not** built — the BIOS uses
+> neither.
 
 ### Adding a New Command
 

@@ -505,23 +505,23 @@ index 0000000000..293fb3bf33
 +
 +} // namespace redfish
 diff --git a/redfish-core/src/redfish.cpp b/redfish-core/src/redfish.cpp
-index 449e2681ae..68053de85a 100644
 --- a/redfish-core/src/redfish.cpp
 +++ b/redfish-core/src/redfish.cpp
-@@ -66,6 +66,7 @@
+@@ -64,6 +64,8 @@
+ #include "update_service.hpp"
  #include "virtual_media.hpp"
- 
- #include "oem/asrock/smbios_push.hpp"
+
 +#include "oem/asrock/bios_host_interface.hpp"
- 
++
  namespace redfish
  {
-@@ -257,6 +258,8 @@ RedfishService::RedfishService(App& app)
- 
-     requestRoutesAsRockSmbiosPush(app);
- 
+
+@@ -251,6 +253,8 @@ RedfishService::RedfishService(App& app)
+     // Note, this must be the last route registered
+     requestRoutesRedfish(app);
+
 +    requestRoutesAsRockBiosHostInterface(app);
 +
      requestRoutesOpenBmcManager(*this);
- 
+
      validate();

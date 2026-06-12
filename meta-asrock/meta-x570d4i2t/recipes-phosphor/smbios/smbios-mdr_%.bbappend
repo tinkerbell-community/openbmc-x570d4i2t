@@ -1,13 +1,15 @@
 # Disable Intel-specific CPU inventory providers (no PECI on AMD Ryzen).
 # mdrv2 (smbiosmdrv2app) is enabled by default in the upstream recipe; it
-# provides the xyz.openbmc_project.Smbios.MDR_V2 D-Bus backend that the bmcweb
-# Redfish Host Interface push (0001-asrock-smbios-host-interface-push) drives
-# via AgentSynchronizeData after writing /var/lib/smbios/smbios2.
+# provides the xyz.openbmc_project.Smbios.MDR_V2 D-Bus backend. On this board
+# asrock-ipmi-oem receives the AMI BIOS's IPMI SMBIOS fields (NetFn 0x3A 0xB5
+# SetSmbiosChunk + NetFn 0x32 0x5D LegacyCtrl) and synthesizes the table from
+# FRU/SPD, writes /var/lib/smbios/smbios2, then calls AgentSynchronizeData.
 PACKAGECONFIG:remove = "cpuinfo cpuinfo-peci"
 
-# NOTE: no IPMI SMBIOS ingestion. The AMI host BIOS pushes SMBIOS over the
-# Redfish Host Interface, not IPMI (verified by boot-time KCS capture), so the
-# smbios-ipmi-blob handler is intentionally NOT enabled.
+# smbios-ipmi-blob (phosphor-ipmi-blobs SMBIOS push) is NOT enabled — the AMI
+# BIOS does not use the blob transfer; it uses the AMI-MDR IPMI commands handled
+# in asrock-ipmi-oem. (Verified by live busctl capture + decompiled
+# libipmimsghndlr: only a few OEM string/fields are pushed, no bulk table.)
 
 # Install the DIMM socket/channel location table for this board.
 # Keys are SMBIOS Type 17 Device Locator strings as reported by the ASRock
