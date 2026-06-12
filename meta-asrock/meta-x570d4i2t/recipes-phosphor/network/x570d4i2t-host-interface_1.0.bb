@@ -12,6 +12,7 @@ inherit allarch systemd
 
 SRC_URI = "file://x570d4i2t-usb-network.service \
            file://x570d4i2t-usb-gadget.sh \
+           file://x570d4i2t-usb-hi-ip.service \
            file://80-host-redfish.network"
 
 S = "${UNPACKDIR}"
@@ -24,6 +25,8 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${UNPACKDIR}/x570d4i2t-usb-network.service \
         ${D}${systemd_system_unitdir}/x570d4i2t-usb-network.service
+    install -m 0644 ${UNPACKDIR}/x570d4i2t-usb-hi-ip.service \
+        ${D}${systemd_system_unitdir}/x570d4i2t-usb-hi-ip.service
 
     install -d ${D}${systemd_unitdir}/network
     install -m 0644 ${UNPACKDIR}/80-host-redfish.network \
@@ -31,10 +34,11 @@ do_install() {
 }
 
 SYSTEMD_PACKAGES = "${PN}"
-SYSTEMD_SERVICE:${PN} = "x570d4i2t-usb-network.service"
+SYSTEMD_SERVICE:${PN} = "x570d4i2t-usb-network.service x570d4i2t-usb-hi-ip.service"
 
 FILES:${PN} += "${libexecdir}/x570d4i2t-usb-gadget.sh \
                 ${systemd_system_unitdir}/x570d4i2t-usb-network.service \
+                ${systemd_system_unitdir}/x570d4i2t-usb-hi-ip.service \
                 ${systemd_unitdir}/network/80-host-redfish.network"
 
 # The gadget is created directly via configfs (busybox sh), so no usb-ctrl /

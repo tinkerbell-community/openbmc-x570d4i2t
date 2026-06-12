@@ -26,6 +26,13 @@ IPv6AcceptRA=no
 # the address regardless of carrier and keep the link up.
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=yes
+# systemd-networkd's ConfigureWithoutCarrier does NOT actually apply the static
+# Address to this carrier-less gadget on this systemd (verified live: usb0 sits
+# "no-carrier (configuring)" with no inet). The companion oneshot
+# x570d4i2t-usb-hi-ip.service adds 169.254.0.17 directly after the gadget binds;
+# KeepConfiguration=yes stops networkd from flushing that address when it later
+# reconfigures usb0 on carrier changes (i.e. when the host enumerates/connects).
+KeepConfiguration=yes
 
 [Link]
 RequiredForOnline=no

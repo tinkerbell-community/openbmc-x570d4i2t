@@ -82,3 +82,18 @@ fi
 
 echo "$udc" > UDC
 log "ECM gadget bound to UDC $udc (netdev usb0)"
+
+# Assign the static Redfish Host Interface address directly, at BMC boot.
+#
+# The usb0 gadget has no carrier until the host enumerates it (carrier comes up
+# on host power-on), and systemd-networkd's ConfigureWithoutCarrier=yes does NOT
+# assign an address while carrier is absent on this systemd version.  So assign
+# 169.254.0.17 here so bmcweb is reachable there from BMC boot onward — well
+# before the host powers on and opens its RHI connection.  80-host-redfish.network
+# lists the same Address (with ConfigureWithoutCarrier), so networkd keeps this
+# address (it matches its own config) and re-affirms it when carrier appears.
+ip link set usb0 up 2>/dev/null || true
+if ! ip -4 addr show usb0 2>/dev/null | grep -q '169\.254\.0\.17/16'; then
+    ip addr add 169.254.0.17/16 dev usb0 2>/dev/null || true
+    log "assigned 169.254.0.17/16 to usb0"
+fi
