@@ -4,6 +4,7 @@
 // smbiosbuild:: SMBIOS table synthesizer implementation.
 
 #include <smbiosbuilder.hpp>
+#include <amiconverter.hpp>
 #include <spdreader.hpp>
 
 #include <ipmid/api.hpp>
@@ -33,26 +34,39 @@ namespace
 std::string g_biosVersion;     // e.g. "2.59C"
 std::string g_biosReleaseDate; // e.g. "11/14/2022"
 std::string g_boardName;       // e.g. "X570D4I-2T"
+
+// Cache: the table is rebuilt (running the expensive SPD/FRU reads) only when a
+// host field actually changes. g_dirty starts true so the first build runs.
+bool                 g_dirty = true;
+std::vector<uint8_t> g_cachedTable;
 } // namespace
 
 void setHostBios(const std::string& version, const std::string& releaseDate)
 {
-    if (!version.empty())
+    if (!version.empty() && version != g_biosVersion)
     {
         g_biosVersion = version;
+        g_dirty = true;
     }
-    if (!releaseDate.empty())
+    if (!releaseDate.empty() && releaseDate != g_biosReleaseDate)
     {
         g_biosReleaseDate = releaseDate;
+        g_dirty = true;
     }
 }
 
 void setHostBoardName(const std::string& productName)
 {
-    if (!productName.empty())
+    if (!productName.empty() && productName != g_boardName)
     {
         g_boardName = productName;
+        g_dirty = true;
     }
+}
+
+bool needsRebuild()
+{
+    return g_dirty || g_cachedTable.empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +256,13 @@ std::string firstNonEmpty(const std::string& a, const std::string& b,
 // ---------------------------------------------------------------------------
 std::vector<uint8_t> buildSmbiosTable()
 {
+    // Fast path: nothing changed since the last build — return the cached table
+    // (no SPD/FRU I/O). Keeps repeated 0x5D commits cheap and byte-stable.
+    if (!g_dirty && !g_cachedTable.empty())
+    {
+        return g_cachedTable;
+    }
+
     FruInfo fru = readFru();
     auto dimms = spd::readAllDimms();
 
@@ -495,7 +516,35 @@ std::vector<uint8_t> buildSmbiosTable()
                      entry("DIMMS=%d", populated),
                      entry("BIOS=%s", g_biosVersion.c_str()),
                      entry("PRODUCT=%s", sysProd.c_str()));
-    return out;
+
+    // Cache and mark clean so subsequent commits fast-path until a field changes.
+    if (populated > 0)
+    {
+        g_cachedTable = out;
+        g_dirty = false;
+        return out;
+    }
+
+    // No DIMMs read. On AMD the SoC claims the SPD SMBus after memory training,
+    // so SPD is only readable early in POST / host-off; a runtime read returns
+    // nothing. NEVER regress a previously-good table to an empty one — keep
+    // serving the last good table (in-memory cache, else the on-disk copy).
+    // Leave g_dirty as-is (do NOT freeze): keep retrying so the next POST, when
+    // SPD is readable again, rebuilds with real DIMMs.
+    if (!g_cachedTable.empty())
+    {
+        log<level::WARNING>(
+            "buildSmbiosTable: SPD empty (bus claimed by SoC?), keeping cached table");
+        return g_cachedTable;
+    }
+    auto onDisk = ami::loadMdrPayload();
+    if (!onDisk.empty())
+    {
+        log<level::WARNING>(
+            "buildSmbiosTable: SPD empty, retaining existing on-disk table");
+        return onDisk;
+    }
+    return out; // never had a good table — best effort (empty DIMMs)
 }
 
 } // namespace smbiosbuild

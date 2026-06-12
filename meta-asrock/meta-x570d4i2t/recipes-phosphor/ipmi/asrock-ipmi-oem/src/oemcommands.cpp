@@ -1117,6 +1117,15 @@ static ipmi::RspType<std::vector<uint8_t>>
 // it as MDR V2 for smbios-mdr + the BIOS's 0x72 GetBlock read-back.
 static bool rebuildAndPersistSmbios()
 {
+    // Fast path: the table is already built + persisted and no host field has
+    // changed. The AMI BIOS commits (0x5D) repeatedly during POST; doing the
+    // full SPD/FRU rebuild + file write + MDR sync each time is slow (~1s, i2c
+    // during memory training) and makes the BIOS time out and retry. Skip it.
+    if (!smbiosbuild::needsRebuild())
+    {
+        return true;
+    }
+
     std::vector<uint8_t> table = smbiosbuild::buildSmbiosTable();
     if (table.empty())
     {

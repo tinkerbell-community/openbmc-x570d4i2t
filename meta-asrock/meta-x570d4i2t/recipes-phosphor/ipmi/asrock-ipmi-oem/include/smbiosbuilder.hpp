@@ -32,7 +32,14 @@ void setHostBoardName(const std::string& productName);
 
 // Build the full SMBIOS structure table (Type 0 first, Type 127 last).
 // Returns the raw payload to hand to ami::writeMdrFile (which prepends the
-// 10-byte MDRSMBIOSHeader). Pulls FruDevice + SPD live each call.
+// 10-byte MDRSMBIOSHeader). Caches the result: the expensive SPD/FRU reads run
+// only when a host field has changed (see needsRebuild); otherwise the cached
+// table is returned. This keeps the BIOS's repeated 0x5D commits cheap and the
+// served table byte-stable so the host's GetBlock read-back converges.
 std::vector<uint8_t> buildSmbiosTable();
+
+// True if a fresh build is needed (host field changed, or never built). When
+// false, the persisted table is already current and the commit can fast-path.
+bool needsRebuild();
 
 } // namespace smbiosbuild
