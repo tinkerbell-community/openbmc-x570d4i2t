@@ -1,0 +1,527 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASRock OpenBMC Port <nbatkins@gmail.com>
+Date: Thu, 12 Jun 2026 00:00:00 +0000
+Subject: [PATCH] asrock: add BIOS configuration host-interface endpoints
+
+Routes the AMI host-interface BIOS push into BIOSConfigManager
+BaseBIOSTable/PendingAttributes. PATCH /Bios/Settings sets PendingAttributes
+directly (typed from BaseBIOSTable) since SetAttribute cannot set enums.
+
+Reference: AMI firmware v01.91.00 decompiled Lua source.
+
+Upstream-Status: Inappropriate [X570D4I-2T board-specific OEM Redfish
+host-interface endpoint mirroring AMI Megarac SPX behaviour]
+---
+diff --git a/redfish-core/lib/oem/asrock/bios_host_interface.hpp b/redfish-core/lib/oem/asrock/bios_host_interface.hpp
+new file mode 100644
+index 0000000000..293fb3bf33
+--- /dev/null
++++ b/redfish-core/lib/oem/asrock/bios_host_interface.hpp
+@@ -0,0 +1,486 @@
++// SPDX-License-Identifier: Apache-2.0
++// Copyright (c) ASRock-Rack Inc.
++//
++// Redfish Host Interface BIOS configuration endpoints for the X570D4I-2T.
++//
++// Mirrors the AMI Megarac SPX host-interface handlers
++//   redfish/extensions/host-interface/hi-handlers/registry-collection-hi.lua
++//   redfish/extensions/host-interface/hi-handlers/bios-hi.lua
++// but routes the pushed data into xyz.openbmc_project.BIOSConfigManager
++// (phosphor-bios-config-mgr) rather than AMI's flat-file store.
++//
++// The host BIOS authenticates over the in-band Redfish Host Interface (USB
++// NIC) as the HostAutoFW user and, in order:
++//
++//   1. POST /redfish/v1/Registries
++//        body = DMTF BIOS Attribute Registry. -> converted to BaseBIOSTable
++//        (definitions + current/default values) on BIOSConfigManager.
++//
++//   2. POST /redfish/v1/Systems/<id>/Bios
++//        body = { "AttributeRegistry": ..., "Attributes": {name:value} } the
++//        current values. -> merged into BaseBIOSTable current fields and
++//        PendingAttributes cleared (staged settings now applied).
++//
++//   3. GET  /redfish/v1/Systems/<id>/Bios/Settings
++//        -> served here from PendingAttributes (stock bmcweb has no such
++//        route), so the BIOS reads the values a user staged and applies them
++//        on the next boot.
++//
++// A user stages a change with PATCH /redfish/v1/Systems/<id>/Bios/Settings,
++// which sets BIOSConfigManager.PendingAttributes directly, tagging each value
++// with its BaseBIOSTable type.  We do NOT use the SetAttribute method: it only
++// ever tags a pending value as String or Integer, and BIOSConfigManager's
++// PendingAttributes validator then rejects it (InvalidArgument) against an
++// Enumeration BaseBIOSTable entry, so SetAttribute cannot set enum attributes.
++//
++// Reference: registry-collection-hi.lua / bios-hi.lua
++//            (AMI firmware v01.91.00 decompiled Lua source)
++
++#pragma once
++
++#include "app.hpp"
++#include "async_resp.hpp"
++#include "dbus_utility.hpp"
++#include "error_messages.hpp"
++#include "logging.hpp"
++#include "privileges.hpp"
++#include "routing.hpp"
++
++#include <boost/beast/http/status.hpp>
++#include <boost/system/error_code.hpp>
++#include <nlohmann/json.hpp>
++#include <sdbusplus/asio/property.hpp>
++
++#include <cstdint>
++#include <map>
++#include <memory>
++#include <string>
++#include <tuple>
++#include <utility>
++#include <variant>
++#include <vector>
++
++namespace redfish
++{
++namespace asrock_bios
++{
++
++constexpr const char* biosConfigSvc = "xyz.openbmc_project.BIOSConfigManager";
++constexpr const char* biosConfigObj =
++    "/xyz/openbmc_project/bios_config/manager";
++constexpr const char* biosConfigIntf =
++    "xyz.openbmc_project.BIOSConfig.Manager";
++constexpr const char* attrTypePrefix =
++    "xyz.openbmc_project.BIOSConfig.Manager.AttributeType.";
++constexpr const char* boundTypePrefix =
++    "xyz.openbmc_project.BIOSConfig.Manager.BoundType.";
++
++// BaseBIOSTable D-Bus type: a{s(sbsssvva(svs))}
++using BiosValue = std::variant<int64_t, std::string>;
++using BiosBound = std::tuple<std::string, BiosValue, std::string>;
++using BiosTableEntry =
++    std::tuple<std::string,             // AttributeType (enum string)
++               bool,                    // ReadOnly
++               std::string,             // DisplayName
++               std::string,             // Description / HelpText
++               std::string,             // MenuPath
++               BiosValue,               // CurrentValue
++               BiosValue,               // DefaultValue
++               std::vector<BiosBound>>; // bounds / enum options
++using BiosBaseTable = std::map<std::string, BiosTableEntry>;
++
++// PendingAttributes D-Bus type: a{s(sv)}
++using PendingEntry = std::tuple<std::string, BiosValue>;
++using PendingAttributes = std::map<std::string, PendingEntry>;
++
++inline std::string mapAttrType(std::string_view dmtf)
++{
++    if (dmtf == "Enumeration")
++    {
++        return std::string(attrTypePrefix) + "Enumeration";
++    }
++    if (dmtf == "Integer")
++    {
++        return std::string(attrTypePrefix) + "Integer";
++    }
++    if (dmtf == "Boolean")
++    {
++        return std::string(attrTypePrefix) + "Boolean";
++    }
++    if (dmtf == "Password")
++    {
++        return std::string(attrTypePrefix) + "Password";
++    }
++    return std::string(attrTypePrefix) + "String";
++}
++
++inline BiosValue jsonToBiosValue(const nlohmann::json& v)
++{
++    if (v.is_number_integer() || v.is_number_unsigned())
++    {
++        return BiosValue(v.get<int64_t>());
++    }
++    if (v.is_boolean())
++    {
++        return BiosValue(static_cast<int64_t>(v.get<bool>() ? 1 : 0));
++    }
++    if (v.is_string())
++    {
++        return BiosValue(v.get<std::string>());
++    }
++    return BiosValue(v.is_null() ? std::string{} : v.dump());
++}
++
++inline int64_t jsonToInt(const nlohmann::json& v)
++{
++    return v.is_number() ? v.get<int64_t>() : 0;
++}
++
++inline void biosValueToJson(const BiosValue& val, nlohmann::json& out)
++{
++    if (const int64_t* p = std::get_if<int64_t>(&val))
++    {
++        out = *p;
++    }
++    else
++    {
++        out = std::get<std::string>(val);
++    }
++}
++
++// Convert one DMTF AttributeRegistry attribute object into a BaseBIOSTable
++// entry.  Returns false if the attribute has no usable AttributeName.
++inline bool buildEntry(const nlohmann::json& attr, std::string& nameOut,
++                       BiosTableEntry& entryOut)
++{
++    auto nameIt = attr.find("AttributeName");
++    if (nameIt == attr.end() || !nameIt->is_string())
++    {
++        return false;
++    }
++    nameOut = nameIt->get<std::string>();
++
++    std::string dmtfType = attr.value("Type", std::string("String"));
++    BiosValue current = attr.contains("CurrentValue")
++                            ? jsonToBiosValue(attr["CurrentValue"])
++                            : BiosValue(std::string{});
++    BiosValue defaultV = attr.contains("DefaultValue")
++                             ? jsonToBiosValue(attr["DefaultValue"])
++                             : current;
++
++    std::vector<BiosBound> bounds;
++    if (dmtfType == "Enumeration")
++    {
++        auto valIt = attr.find("Value");
++        if (valIt != attr.end() && valIt->is_array())
++        {
++            for (const auto& opt : *valIt)
++            {
++                std::string valName = opt.value("ValueName", std::string{});
++                if (!valName.empty())
++                {
++                    bounds.emplace_back(std::string(boundTypePrefix) + "OneOf",
++                                        BiosValue(valName), std::string{});
++                }
++            }
++        }
++    }
++    else if (dmtfType == "Integer")
++    {
++        if (attr.contains("LowerBound"))
++        {
++            bounds.emplace_back(std::string(boundTypePrefix) + "LowerBound",
++                                BiosValue(jsonToInt(attr["LowerBound"])),
++                                std::string{});
++        }
++        if (attr.contains("UpperBound"))
++        {
++            bounds.emplace_back(std::string(boundTypePrefix) + "UpperBound",
++                                BiosValue(jsonToInt(attr["UpperBound"])),
++                                std::string{});
++        }
++        if (attr.contains("ScalarIncrement"))
++        {
++            bounds.emplace_back(std::string(boundTypePrefix) + "ScalarIncrement",
++                                BiosValue(jsonToInt(attr["ScalarIncrement"])),
++                                std::string{});
++        }
++    }
++    else if (dmtfType == "String")
++    {
++        if (attr.contains("MinLength"))
++        {
++            bounds.emplace_back(std::string(boundTypePrefix) + "MinStringLength",
++                                BiosValue(jsonToInt(attr["MinLength"])),
++                                std::string{});
++        }
++        if (attr.contains("MaxLength"))
++        {
++            bounds.emplace_back(std::string(boundTypePrefix) + "MaxStringLength",
++                                BiosValue(jsonToInt(attr["MaxLength"])),
++                                std::string{});
++        }
++    }
++
++    entryOut = BiosTableEntry{mapAttrType(dmtfType),
++                              attr.value("ReadOnly", false),
++                              attr.value("DisplayName", nameOut),
++                              attr.value("HelpText", std::string{}),
++                              attr.value("MenuPath", std::string{}),
++                              std::move(current), std::move(defaultV),
++                              std::move(bounds)};
++    return true;
++}
++
++} // namespace asrock_bios
++
++inline void requestRoutesAsRockBiosHostInterface(App& app)
++{
++    using namespace asrock_bios;
++
++    // (1) POST /redfish/v1/Registries — BIOS uploads its Attribute Registry.
++    BMCWEB_ROUTE(app, "/redfish/v1/Registries/")
++        .privileges({{"ConfigureComponents"}})
++        .methods(boost::beast::http::verb::post)(
++            [](const crow::Request& req,
++               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp) {
++                nlohmann::json body =
++                    nlohmann::json::parse(req.body(), nullptr, false);
++                if (body.is_discarded())
++                {
++                    messages::malformedJSON(asyncResp->res);
++                    return;
++                }
++                const nlohmann::json* attrs = nullptr;
++                if (auto re = body.find("RegistryEntries"); re != body.end())
++                {
++                    if (auto a = re->find("Attributes");
++                        a != re->end() && a->is_array())
++                    {
++                        attrs = &(*a);
++                    }
++                }
++                if (attrs == nullptr)
++                {
++                    messages::propertyMissing(asyncResp->res,
++                                              "RegistryEntries/Attributes");
++                    return;
++                }
++                BiosBaseTable table;
++                for (const auto& attr : *attrs)
++                {
++                    std::string name;
++                    BiosTableEntry entry;
++                    if (buildEntry(attr, name, entry))
++                    {
++                        table.emplace(std::move(name), std::move(entry));
++                    }
++                }
++                sdbusplus::asio::setProperty(
++                    *crow::connections::systemBus, biosConfigSvc, biosConfigObj,
++                    biosConfigIntf, "BaseBIOSTable", std::move(table),
++                    [asyncResp](const boost::system::error_code& ec) {
++                        if (ec)
++                        {
++                            BMCWEB_LOG_ERROR(
++                                "BIOS HI: set BaseBIOSTable failed: {}",
++                                ec.message());
++                            messages::internalError(asyncResp->res);
++                            return;
++                        }
++                        asyncResp->res.result(
++                            boost::beast::http::status::no_content);
++                    });
++            });
++
++    // (2) POST /redfish/v1/Systems/<id>/Bios — BIOS reports current values.
++    // Read-modify-write BaseBIOSTable current fields, then clear pending.
++    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Bios")
++        .privileges({{"ConfigureComponents"}})
++        .methods(boost::beast::http::verb::post)(
++            [](const crow::Request& req,
++               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
++               const std::string& /*systemId*/) {
++                nlohmann::json body =
++                    nlohmann::json::parse(req.body(), nullptr, false);
++                if (body.is_discarded())
++                {
++                    messages::malformedJSON(asyncResp->res);
++                    return;
++                }
++                auto attrsIt = body.find("Attributes");
++                if (attrsIt == body.end() || !attrsIt->is_object())
++                {
++                    messages::propertyMissing(asyncResp->res, "Attributes");
++                    return;
++                }
++                auto updates =
++                    std::make_shared<std::map<std::string, BiosValue>>();
++                for (const auto& el : attrsIt->items())
++                {
++                    updates->emplace(el.key(), jsonToBiosValue(el.value()));
++                }
++                sdbusplus::asio::getProperty<BiosBaseTable>(
++                    *crow::connections::systemBus, biosConfigSvc, biosConfigObj,
++                    biosConfigIntf, "BaseBIOSTable",
++                    [asyncResp, updates](const boost::system::error_code& ec,
++                                         BiosBaseTable table) {
++                        if (ec)
++                        {
++                            BMCWEB_LOG_ERROR(
++                                "BIOS HI: get BaseBIOSTable failed: {}",
++                                ec.message());
++                            messages::internalError(asyncResp->res);
++                            return;
++                        }
++                        for (const auto& [name, val] : *updates)
++                        {
++                            auto it = table.find(name);
++                            if (it != table.end())
++                            {
++                                std::get<5>(it->second) = val;
++                            }
++                        }
++                        sdbusplus::asio::setProperty(
++                            *crow::connections::systemBus, biosConfigSvc,
++                            biosConfigObj, biosConfigIntf, "BaseBIOSTable",
++                            std::move(table),
++                            [asyncResp](const boost::system::error_code& ec2) {
++                                if (ec2)
++                                {
++                                    messages::internalError(asyncResp->res);
++                                    return;
++                                }
++                                sdbusplus::asio::setProperty(
++                                    *crow::connections::systemBus, biosConfigSvc,
++                                    biosConfigObj, biosConfigIntf,
++                                    "PendingAttributes", PendingAttributes{},
++                                    [asyncResp](
++                                        const boost::system::error_code& ec3) {
++                                        if (ec3)
++                                        {
++                                            messages::internalError(
++                                                asyncResp->res);
++                                            return;
++                                        }
++                                        asyncResp->res.result(
++                                            boost::beast::http::status::
++                                                no_content);
++                                    });
++                            });
++                    });
++            });
++
++    // (3) GET /redfish/v1/Systems/<id>/Bios/Settings — pending values to apply.
++    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Bios/Settings")
++        .privileges({{"ConfigureComponents"}})
++        .methods(boost::beast::http::verb::get)(
++            [](const crow::Request& /*req*/,
++               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
++               const std::string& systemId) {
++                sdbusplus::asio::getProperty<PendingAttributes>(
++                    *crow::connections::systemBus, biosConfigSvc, biosConfigObj,
++                    biosConfigIntf, "PendingAttributes",
++                    [asyncResp, systemId](const boost::system::error_code& ec,
++                                          PendingAttributes pending) {
++                        nlohmann::json& j = asyncResp->res.jsonValue;
++                        j["@odata.id"] = "/redfish/v1/Systems/" + systemId +
++                                         "/Bios/Settings";
++                        j["@odata.type"] = "#Bios.v1_1_0.Bios";
++                        j["Id"] = "Settings";
++                        j["Name"] = "BIOS Configuration Pending Settings";
++                        nlohmann::json attrs = nlohmann::json::object();
++                        if (!ec)
++                        {
++                            for (const auto& [name, entry] : pending)
++                            {
++                                biosValueToJson(std::get<1>(entry),
++                                                attrs[name]);
++                            }
++                        }
++                        j["Attributes"] = std::move(attrs);
++                    });
++            });
++
++    // (4) PATCH /redfish/v1/Systems/<id>/Bios/Settings — stage pending values.
++    // Build PendingAttributes directly, taking each attribute's type from
++    // BaseBIOSTable (SetAttribute cannot set Enumeration attributes).
++    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Bios/Settings")
++        .privileges({{"ConfigureComponents"}})
++        .methods(boost::beast::http::verb::patch)(
++            [](const crow::Request& req,
++               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
++               const std::string& /*systemId*/) {
++                nlohmann::json body =
++                    nlohmann::json::parse(req.body(), nullptr, false);
++                if (body.is_discarded())
++                {
++                    messages::malformedJSON(asyncResp->res);
++                    return;
++                }
++                auto attrsIt = body.find("Attributes");
++                if (attrsIt == body.end() || !attrsIt->is_object())
++                {
++                    messages::propertyMissing(asyncResp->res, "Attributes");
++                    return;
++                }
++                auto updates =
++                    std::make_shared<std::map<std::string, BiosValue>>();
++                for (const auto& el : attrsIt->items())
++                {
++                    updates->emplace(el.key(), jsonToBiosValue(el.value()));
++                }
++                if (updates->empty())
++                {
++                    asyncResp->res.result(
++                        boost::beast::http::status::no_content);
++                    return;
++                }
++                sdbusplus::asio::getProperty<BiosBaseTable>(
++                    *crow::connections::systemBus, biosConfigSvc, biosConfigObj,
++                    biosConfigIntf, "BaseBIOSTable",
++                    [asyncResp, updates](const boost::system::error_code& ec,
++                                         BiosBaseTable table) {
++                        if (ec)
++                        {
++                            BMCWEB_LOG_ERROR(
++                                "BIOS HI: get BaseBIOSTable failed: {}",
++                                ec.message());
++                            messages::internalError(asyncResp->res);
++                            return;
++                        }
++                        PendingAttributes pending;
++                        for (const auto& [name, val] : *updates)
++                        {
++                            auto it = table.find(name);
++                            if (it == table.end())
++                            {
++                                messages::resourceNotFound(
++                                    asyncResp->res, "BiosAttribute", name);
++                                return;
++                            }
++                            pending.emplace(
++                                name,
++                                PendingEntry{std::get<0>(it->second), val});
++                        }
++                        sdbusplus::asio::setProperty(
++                            *crow::connections::systemBus, biosConfigSvc,
++                            biosConfigObj, biosConfigIntf, "PendingAttributes",
++                            std::move(pending),
++                            [asyncResp](const boost::system::error_code& ec2) {
++                                if (ec2)
++                                {
++                                    BMCWEB_LOG_ERROR(
++                                        "BIOS HI: set PendingAttributes failed: {}",
++                                        ec2.message());
++                                    messages::internalError(asyncResp->res);
++                                    return;
++                                }
++                                asyncResp->res.result(
++                                    boost::beast::http::status::no_content);
++                            });
++                    });
++            });
++}
++
++} // namespace redfish
+diff --git a/redfish-core/src/redfish.cpp b/redfish-core/src/redfish.cpp
+index 449e2681ae..68053de85a 100644
+--- a/redfish-core/src/redfish.cpp
++++ b/redfish-core/src/redfish.cpp
+@@ -66,6 +66,7 @@
+ #include "virtual_media.hpp"
+ 
+ #include "oem/asrock/smbios_push.hpp"
++#include "oem/asrock/bios_host_interface.hpp"
+ 
+ namespace redfish
+ {
+@@ -257,6 +258,8 @@ RedfishService::RedfishService(App& app)
+ 
+     requestRoutesAsRockSmbiosPush(app);
+ 
++    requestRoutesAsRockBiosHostInterface(app);
++
+     requestRoutesOpenBmcManager(*this);
+ 
+     validate();

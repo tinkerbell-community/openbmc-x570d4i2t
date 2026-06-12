@@ -1,3 +1,21 @@
+# Redfish Host Interface OEM endpoints for the X570D4I-2T.
+#
+# The AMI Megarac SPX host BIOS pushes SMBIOS and BIOS-configuration data to
+# the BMC over the in-band Redfish Host Interface (USB NIC), authenticating as
+# the HostAutoFW user. These two patches add the bmcweb routes the BIOS POSTs
+# to and wire them into the OpenBMC services:
+#   0001 — POST/DELETE /redfish/v1/Systems/<id>/Smbios -> smbios-mdrv2
+#   0002 — POST /redfish/v1/Registries (Attribute Registry) and
+#          POST /redfish/v1/Systems/<id>/Bios (current values) ->
+#          xyz.openbmc_project.BIOSConfigManager BaseBIOSTable/PendingAttributes
+# Both mirror the decompiled AMI host-interface Lua handlers (firmware
+# v01.91.00: smbios-hi.lua, registry-collection-hi.lua, bios-hi.lua).
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
+SRC_URI:append = " \
+    file://0001-asrock-smbios-host-interface-push.patch \
+    file://0002-asrock-bios-host-interface.patch \
+    "
+
 # Disable bmcweb's zstd HTTP compression.
 #
 # Upstream bmcweb 8a32dac3 (and surrounding commits) attempts zstd compression

@@ -10,13 +10,12 @@ Provides: \
     identify LED), ChassisIdentify (LED group), GetSystemRestartCause \
   - Sensor NetFn override: PlatformEvent (routes to phosphor-logging / Redfish) \
   - Storage NetFn overrides: GetSELInfo, AddSELEntry (Redfish bridge), GetSELTime \
-  - BIOS OOB configuration protocol (SetBIOSCap / GetBIOSCap, \
-    SetPayload / GetPayload) — received BIOS XML stored in /var/oob/ and \
-    published on xyz.openbmc_project.BIOSConfig.Manager \
   - AMI/ASRock OEM commands (NetFn 0x30): GetBoardInfo, GetSensorInfo, \
     GetFwVersion, MuxSwitching (GPIOJ1), PeciReadWrite stub, PsuInfo, \
     ManageBmcConfig, GetSelPolicy, YAFU stubs (phosphor-ipmi-blobs path) \
-  - MDR2 SMBIOS transfer protocol (NetFn 0x3E, 12 handlers) \
+\
+SMBIOS is handled over the Redfish Host Interface (bmcweb 0001 patch \
+-> smbios-mdrv2), not IPMI; BIOS configuration likewise (bmcweb 0002 patch). \
 "
 
 LICENSE = "Apache-2.0"
@@ -25,16 +24,11 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://meson.build \
     file://meson.options \
-    file://include/amiconverter.hpp \
-    file://include/biosconfig.hpp \
     file://include/oemcommands.hpp \
-    file://src/amiconverter.cpp \
     file://src/appcommands.cpp \
-    file://src/biosconfig.cpp \
     file://src/chassiscommands.cpp \
     file://src/oemcommands.cpp \
     file://src/sensorcommands.cpp \
-    file://src/smbiosmdrv2handler.cpp \
     file://src/storagecommands.cpp \
     "
 
@@ -66,12 +60,3 @@ FILES:${PN}:append = " \
     ${libdir}/net-ipmid/lib*${SOLIBS} \
     "
 FILES:${PN}-dev:append = " ${libdir}/ipmid-providers/lib*${SOLIBSDEV}"
-
-# Create /var/oob/ at first boot via tmpfiles
-do_install:append() {
-    install -d ${D}${sysconfdir}/tmpfiles.d
-    echo "d /var/oob 0755 root root -" > \
-        ${D}${sysconfdir}/tmpfiles.d/asrock-ipmi-oem.conf
-}
-
-FILES:${PN}:append = " ${sysconfdir}/tmpfiles.d/asrock-ipmi-oem.conf"

@@ -51,9 +51,12 @@ RDEPENDS:${PN}-system = " \
         phosphor-software-manager \
         phosphor-virtual-sensor \
         x570d4i2t-vga-enable \
+        x570d4i2t-host-interface \
+        x570d4i2t-hostfw-user \
         aspeed-video-watchdog \
         nct6779-bridge \
         smbios-mdr \
+        biosconfig-manager \
         asrock-ipmi-oem \
         dbus-sensors \
         "

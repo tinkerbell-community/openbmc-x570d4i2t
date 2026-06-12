@@ -1,5 +1,5 @@
 ---
-description: "Use when implementing, extending, or debugging IPMI OEM command handlers for the X570D4I-2T OpenBMC layer. Covers all Megarac/AMI BIOS IPMI methods, the BIOS OOB payload protocol, MDR2 SMBIOS transfer, KCS channels, EFI variable access, D-Bus interfaces, command codes, completion codes, and wire-format structs."
+description: "Use when implementing, extending, or debugging IPMI OEM command handlers for the X570D4I-2T OpenBMC layer. Covers Megarac/AMI OEM IPMI methods, MDR2 SMBIOS transfer, KCS channels, EFI variable access, D-Bus interfaces, command codes, and wire-format structs. NOTE: BIOS configuration is NOT done over IPMI on this board — it uses the Redfish Host Interface (see §2.1); the IPMI OOB payload protocol is documented only as historical reference."
 applyTo:
   - "meta-asrock/meta-x570d4i2t/recipes-phosphor/ipmi/asrock-ipmi-oem/**"
   - "meta-asrock/meta-x570d4i2t/recipes-phosphor/smbios/**"
@@ -34,24 +34,53 @@ The AST2500 exposes three KCS (Keyboard Controller Style) channels used for in-b
 
 ---
 
-## 2. BIOS OOB Configuration Protocol
+## 2. BIOS Configuration Protocol
 
-### 2.1 Overview
+### 2.1 Overview — this board uses the Redfish Host Interface, NOT IPMI
 
-The AMI BIOS populates the BMC's BIOS setup database by pushing a compressed XML payload via IPMI OEM commands. The BMC decompresses it and exposes the data via the `xyz.openbmc_project.BIOSConfig.Manager` D-Bus interface, which bmcweb serves as Redfish `/redfish/v1/Systems/system/Bios`.
+> **CORRECTION (verified against AMI firmware v01.91.00 decompiled Lua +
+> boot-time KCS capture):** the X570D4I-2T AMI Aptio BIOS does **NOT** push
+> BIOS setup data over IPMI. It pushes over the in-band **Redfish Host
+> Interface** (USB-NIC, authenticating as the `HostAutoFW` user). The
+> Intel-style IPMI OOB payload commands described in §2.2–§2.7 below
+> (`SetBIOSCap`/`GetBIOSCap`/`SetPayload`/`GetPayload`) are **never issued by
+> this firmware** and the handlers that implemented them have been **removed**
+> from `asrock-ipmi-oem` (was `src/biosconfig.cpp`). §2.2–§2.7 are retained
+> only as a historical reference to the protocol intel-ipmi-oem implements.
 
-Protocol phases (sequential, during POST via KCS1/SMM channel):
+**Actual mechanism (host BIOS → BMC, all over the Redfish Host Interface):**
+
 ```
-BIOS → SetBIOSCap  →  BMC records capability flags
-BIOS → SetPayload(StartTransfer)  →  BMC opens slot, returns reservationID
-BIOS → SetPayload(InProgress) × N  →  BMC accumulates chunks with CRC-32 check
-BIOS → SetPayload(EndTransfer)  →  BMC decompresses → /var/oob/bios.xml → D-Bus
-BIOS → GetPayload(GetPayloadData)  →  BMC returns pending attribute changes (type 1)
+BIOS → POST /redfish/v1/Registries             (DMTF BIOS Attribute Registry)
+                                                 → BaseBIOSTable (definitions + defaults)
+BIOS → POST /redfish/v1/Systems/<id>/Bios       (current values)
+                                                 → BaseBIOSTable current fields; clears pending
+user → PATCH /redfish/v1/Systems/<id>/Bios/SD    (stage a change)        ┐ both names
+user → PATCH /redfish/v1/Systems/<id>/Bios/Settings                       ┘ → PendingAttributes
+BIOS → GET  /redfish/v1/Systems/<id>/Bios/SD     (read staged values, apply on next boot)
 ```
+
+The store is `xyz.openbmc_project.BIOSConfigManager`
+(`/xyz/openbmc_project/bios_config/manager`), `BaseBIOSTable` /
+`PendingAttributes`. bmcweb serves it at `/redfish/v1/Systems/<id>/Bios`.
+
+> **Critical URI note:** the AMI host BIOS firmware names its pending/settings
+> resource **`SD`** (`.../Bios/SD`), not the DMTF `Settings`. The bmcweb OEM
+> routes register **both** aliases against the one `PendingAttributes` store.
+> Serving only `/Bios/Settings` makes the BIOS GET 404 and silently breaks the
+> entire stage-then-apply control loop.
+
+**Implementation:** `recipes-phosphor/interfaces/bmcweb/0002-asrock-bios-host-interface.patch`
+(routes + DMTF-registry → `BaseBIOSTable` conversion), mirroring the AMI Lua
+handlers `registry-collection-hi.lua` / `bios-hi.lua`. Companion patch `0001`
+does the same for SMBIOS (`POST /Systems/<id>/Smbios` → smbios-mdrv2).
 
 ### 2.2 Command Codes
 
-All BIOS OOB commands use **NetFn 0x30** (OEM General).
+The `SetBIOSCap`/`GetBIOSCap`/`SetPayload`/`GetPayload` rows below are
+**HISTORICAL** — removed, not used on this board (see §2.1). `GetBoardInfo`
+(0x50) is a real, still-implemented ASRock command (`src/oemcommands.cpp`).
+All use **NetFn 0x30** (OEM General).
 
 | Command       | Code  | Direction     | Privilege | Description |
 |---------------|-------|---------------|-----------|-------------|
@@ -196,17 +225,35 @@ For `GetPayload` payload type 1 (pending attributes), read `PendingAttributes` f
 
 ---
 
-## 3. MDR2 SMBIOS Transfer Protocol
+## 3. SMBIOS Transfer Protocol
 
 ### 3.1 How SMBIOS Reaches the BMC
 
-The AMI BIOS sends SMBIOS tables to the BMC via IPMI OEM commands on **NetFn 0x3E** (`netFnOemEight`). The OpenBMC `smbios-mdr` package (`smbiosmdrv2app`) provides the D-Bus backend that parses and publishes SMBIOS, but does **not** register its own IPMI handlers. The `asrock-ipmi-oem` plugin bridges the IPMI layer to the D-Bus backend via `src/smbiosmdrv2handler.cpp`.
+> **CORRECTION (verified against boot-time KCS capture + AMI Lua):** the AMI
+> Aptio BIOS does **NOT** send SMBIOS over IPMI on this board (the capture
+> shows no NetFn 0x3E and ≤18 B payloads — far too small for MDR chunking).
+> It pushes the SMBIOS table over the in-band **Redfish Host Interface**, the
+> same way it pushes BIOS config (§2.1). The IPMI MDR2 (NetFn 0x3E) handler
+> `src/smbiosmdrv2handler.cpp` **and** the AMI-MDR block that had been added to
+> `src/oemcommands.cpp` (NetFn 0x3A, `0xB2`/`0xA0`/`0xB5`/`0x31`/`0x3D`/`0x51`…)
+> were both **removed**. §3.2 below is retained only as a historical reference
+> to the intel-ipmi-oem MDR2 protocol.
 
-- `smbios-mdr_%.bbappend` removes Intel-specific CPU inventory providers (`cpuinfo`, `cpuinfo-peci`) and enables `smbios-ipmi-blob` (blob interface for direct SMBIOS file upload).
+**Actual mechanism:** the host BIOS does
+`POST /redfish/v1/Systems/<id>/Smbios` (raw SMBIOS table, multipart) over the
+Redfish Host Interface. The bmcweb OEM handler
+(`0001-asrock-smbios-host-interface-push.patch`):
+
+1. Prepends the phosphor-smbios-mdr `MDRSMBIOSHeader` (dirVer=1, mdrType=2).
+2. Writes the result to `/var/lib/smbios/smbios2`.
+3. Calls `xyz.openbmc_project.Smbios.MDR_V2` / `AgentSynchronizeData()` so
+   `smbiosmdrv2app` re-parses the table and re-populates D-Bus inventory.
+
+- `smbios-mdr_%.bbappend` removes Intel-specific CPU inventory providers (`cpuinfo`, `cpuinfo-peci`); `mdrv2` (`smbiosmdrv2app`) stays enabled by default.
 - `smbiosmdrv2app` exposes `xyz.openbmc_project.Smbios.MDR_V2` and parses `/var/lib/smbios/smbios2` when `AgentSynchronizeData` is called.
 - Board-specific DIMM socket mapping is provided by `memoryLocationTable.json`.
 
-### 3.2 MDR2 Command Set (NetFn **0x3E** / `netFnOemEight`, implemented in `asrock-ipmi-oem`)
+### 3.2 MDR2 Command Set (HISTORICAL — removed; see §3.1)
 
 `smbiosmdrv2app` provides the D-Bus backend but does **not** register IPMI handlers.
 The IPMI→D-Bus bridge is in `src/smbiosmdrv2handler.cpp`.
@@ -261,16 +308,16 @@ Installed at `/usr/share/smbios-mdr/memoryLocationTable.json` by the bbappend.
 
 ## 4. AMI-Specific Commands (Megarac Reference Only)
 
-The following AMI Megarac `libipmiamioembiosremotecontrol.so.6.1.0` commands were discovered by reverse engineering. They are documented here as a reference for understanding the protocol origin; the OpenBMC equivalents are the OOB payload commands in Section 2.
+The following AMI Megarac `libipmiamioembiosremotecontrol.so.6.1.0` commands were discovered by reverse engineering. They are documented here only as a reference for understanding the protocol origin. On this board the BIOS config path is the **Redfish Host Interface** (§2.1), so the OpenBMC equivalents are the bmcweb OEM routes that read/write `BIOSConfigManager`, **not** any IPMI command.
 
-| AMI Function              | Megarac NetFn | Direction     | OpenBMC Equivalent |
+| AMI Function              | Megarac NetFn | Direction     | OpenBMC Equivalent (Redfish Host Interface) |
 |---------------------------|---------------|---------------|--------------------|
-| `AMISendToBios`           | `0x30`/`0x??` | BMC → BIOS    | `SetPayload(EndTransfer)` triggers decompression + D-Bus |
-| `AMIGetBiosCommand`       | `0x30`/`0x??` | BMC → BIOS    | `GetPayload(GetPayloadData)` reads pending attrs |
-| `AMISetBiosResponse`      | `0x30`/`0x??` | BMC → BIOS    | Write to `BIOSConfig.Manager.PendingAttributes` |
-| `AMIGetBiosResponse`      | `0x30`/`0x??` | BIOS → BMC    | Read `BIOSConfig.Manager.BaseBIOSTable` |
-| `AMISetBiosFlag`          | `0x30`/`0x??` | Host → BMC    | Set `BIOSConfig.Manager.ResetBIOSSettings` |
-| `AMIGetBiosFlag`          | `0x30`/`0x??` | Host → BMC    | Get `BIOSConfig.Manager.ResetBIOSSettings` |
+| `AMISendToBios`           | `0x30`/`0x??` | BMC → BIOS    | `POST /Systems/<id>/Bios` → `BaseBIOSTable` current values |
+| `AMIGetBiosCommand`       | `0x30`/`0x??` | BMC → BIOS    | `GET /Systems/<id>/Bios/SD` → `PendingAttributes` |
+| `AMISetBiosResponse`      | `0x30`/`0x??` | BMC → BIOS    | `PATCH /Systems/<id>/Bios/SD` → `BIOSConfigManager.PendingAttributes` |
+| `AMIGetBiosResponse`      | `0x30`/`0x??` | BIOS → BMC    | `POST /Registries` → `BIOSConfigManager.BaseBIOSTable` |
+| `AMISetBiosFlag`          | `0x30`/`0x??` | Host → BMC    | Set `BIOSConfigManager.ResetBIOSSettings` |
+| `AMIGetBiosFlag`          | `0x30`/`0x??` | Host → BMC    | Get `BIOSConfigManager.ResetBIOSSettings` |
 
 Megarac persistence: `/conf/BMC{N}/BIOS_FLAG.ini` (INI file per BMC instance).
 OpenBMC persistence: `biosconfig-manager` stores to `/var/lib/bios-settings-manager/`.
@@ -314,18 +361,25 @@ recipes-phosphor/ipmi/
     ├── meson.build                  # Builds libzasrockoemcmds.so → ${libdir}/ipmid-providers/
     ├── meson.options                # Feature flags (tests disabled by default)
     ├── include/
-    │   ├── biosconfig.hpp           # Wire-format structs, PTState/PStatus/PType enums, NVOOBdata
-    │   └── oemcommands.hpp          # NetFn/command codes (general + mdr namespaces), CC constants
+    │   └── oemcommands.hpp          # NetFn/command codes (general namespace)
     └── src/
-        ├── biosconfig.cpp           # SetBIOSCap, GetBIOSCap, SetPayload, GetPayload handlers
-        ├── oemcommands.cpp          # GetBoardInfo handler + future OEM command handlers
-        └── smbiosmdrv2handler.cpp   # All 12 MDR2 SMBIOS IPMI handlers (NetFn 0x3E)
+        ├── appcommands.cpp          # App NetFn overrides (GetDeviceId, GetSystemGuid)
+        ├── chassiscommands.cpp      # Chassis NetFn overrides
+        ├── oemcommands.cpp          # GetBoardInfo + AMI NetFn 0x30 OEM handlers
+        ├── sensorcommands.cpp       # PlatformEvent override
+        └── storagecommands.cpp      # SEL NetFn overrides
 ```
+
+> Both BIOS configuration (§2.1) and SMBIOS (§3.1) are handled in bmcweb over
+> the Redfish Host Interface, not here. The former IPMI handlers
+> `biosconfig.{cpp,hpp}` (BIOS OOB payload), `smbiosmdrv2handler.cpp` (MDR2),
+> the AMI-MDR block in `oemcommands.cpp`, and `amiconverter.{cpp,hpp}` were all
+> removed.
 
 ### Adding a New Command
 
 1. Add the command code constant to `include/oemcommands.hpp` under `namespace asrock::general`.
-2. Add any new wire-format structs to `include/biosconfig.hpp` (or a new header).
+2. Add any new wire-format structs to a header under `include/`.
 3. Implement the handler function in `src/oemcommands.cpp` (or a new `src/*.cpp` file).
 4. Register with `ipmi::registerHandler()` in the file's `__attribute__((constructor))` function.
 5. Add any new `.cpp` file to the `asrockoemcmds_src` list in `meson.build`.

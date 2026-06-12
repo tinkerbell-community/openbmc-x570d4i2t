@@ -1,0 +1,18 @@
+[Unit]
+Description=Redfish Host Interface USB CDC-ECM gadget (X570D4I-2T)
+# configfs (where the gadget is created) must be mounted first.
+After=sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+# Create the gadget before networkd so usb0 exists when 80-host-redfish.network
+# is applied (networkd also reacts to hotplug, so this is best-effort ordering).
+Before=systemd-networkd.service
+ConditionPathExists=/usr/libexec/x570d4i2t-usb-gadget.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/x570d4i2t-usb-gadget.sh on
+ExecStop=/usr/libexec/x570d4i2t-usb-gadget.sh off
+
+[Install]
+WantedBy=multi-user.target

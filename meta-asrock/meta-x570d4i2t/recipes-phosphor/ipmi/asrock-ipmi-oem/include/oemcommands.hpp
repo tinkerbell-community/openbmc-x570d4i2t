@@ -8,18 +8,18 @@
 // megarac-bios-ipmi-methods implementation reference.
 //
 // NetFn 0x3A (ipmi::netFnOemSix / NETFN_AMI):
-//   - BIOS OOB configuration protocol
 //   - AMI YAFU-replacement stubs
 //   - Board-info and sensor-info commands
 //   - KVM mux, PECI, and PSU OEM handlers
 //
-// NetFn 0x3E (NETFN_TEST_OEM / OEM Eight):
-//   - MDR2 SMBIOS transfer protocol
+// SMBIOS and BIOS configuration are NOT carried over IPMI on this board — the
+// AMI host BIOS pushes both over the Redfish Host Interface (see the bmcweb
+// 0001/0002 asrock host-interface patches). The corresponding IPMI handlers
+// were removed; only the NetFn 0x3A OEM commands below remain.
 //
 // Command codes are sourced from:
 //   - Confirmed g_AMI_CmdHndlr table extraction (bmc-analyze.instructions.md)
 //   - Megarac implementation reference (megarac-bios-ipmi-methods.instructions.md)
-//   - intel-ipmi-oem smbiosmdrv2handler.cpp (MDR2 codes, identical protocol)
 
 #pragma once
 
@@ -33,7 +33,7 @@ namespace asrock
 // -----------------------------------------------------------------------
 
 // All AMI/ASRock OEM commands use NetFn 0x3A (ipmi::netFnOemSix):
-// BIOS OOB, sensor queries, KVM mux, PECI, PSU, firmware version, board ID.
+// sensor queries, KVM mux, PECI, PSU, firmware version, board ID.
 
 // -----------------------------------------------------------------------
 // netFnOemSix (0x3A) command codes
@@ -42,18 +42,13 @@ namespace asrock
 namespace general
 {
 
-// ------------------------------------------------------------------
-// BIOS OOB configuration commands
-// Confirmed: megarac-bios-ipmi-methods §2.2
-// ------------------------------------------------------------------
-
-// Capability negotiation – BIOS declares OOB support during POST
-static constexpr uint8_t cmdSetBIOSCap  = 0x7F; // Admin
-static constexpr uint8_t cmdGetBIOSCap  = 0x7E; // User
-
-// Chunked payload transfer (BIOS→BMC for config XML / BMC→BIOS for pending)
-static constexpr uint8_t cmdSetPayload  = 0x73; // Admin
-static constexpr uint8_t cmdGetPayload  = 0x72; // User
+// NOTE: BIOS configuration is NOT done over IPMI on this board.  The AMI
+// Aptio host BIOS pushes its attribute registry + current/pending values over
+// the in-band Redfish Host Interface (see the bmcweb 0002-asrock-bios-host-
+// interface patch -> xyz.openbmc_project.BIOSConfigManager).  The Intel-style
+// IPMI OOB payload commands (SetBIOSCap/GetBIOSCap/SetPayload/GetPayload) that
+// once lived here were removed: this firmware never issues them (verified by
+// boot-time KCS capture).
 
 // ------------------------------------------------------------------
 // AMI YAFU (firmware upload) — codes 0x01–0x10
@@ -147,47 +142,12 @@ static constexpr uint8_t cmdPsuInfo  = 0xEC; // priv 0xFF (User-visible)
 
 } // namespace general
 
-// -----------------------------------------------------------------------
-// NETFN_TEST_OEM (0x3E) — MDR2 SMBIOS transfer commands
-// Command codes mirror intel-ipmi-oem convention exactly so that any
-// BIOS firmware implementing the phosphor OOB MDR2 protocol works
-// without modification.
-// Reference: megarac-bios-ipmi-methods §3.2
-// -----------------------------------------------------------------------
-
-namespace mdr
-{
-
-static constexpr uint8_t cmdMdrIIAgentStatus      = 0x30;
-static constexpr uint8_t cmdMdrIIGetDir           = 0x31;
-static constexpr uint8_t cmdMdrIIGetDataInfo      = 0x32;
-static constexpr uint8_t cmdMdrIILockData         = 0x33;
-static constexpr uint8_t cmdMdrIIUnlockData       = 0x34;
-static constexpr uint8_t cmdMdrIIGetDataBlock     = 0x35;
-
-static constexpr uint8_t cmdMdrIISendDir          = 0x38;
-static constexpr uint8_t cmdMdrIISendDataInfoOffer = 0x39;
-static constexpr uint8_t cmdMdrIISendDataInfo     = 0x3A;
-static constexpr uint8_t cmdMdrIIDataStart        = 0x3B;
-static constexpr uint8_t cmdMdrIIDataDone         = 0x3C;
-static constexpr uint8_t cmdMdrIISendDataBlock    = 0x3D;
-
-} // namespace mdr
-
-// -----------------------------------------------------------------------
-// IPMI completion codes specific to ASRock OEM commands
-// Reference: megarac-bios-ipmi-methods §2.2
-// -----------------------------------------------------------------------
-
-namespace cc
-{
-
-static constexpr uint8_t payloadPacketMissed  = 0x80; // lzcat decompression failed
-static constexpr uint8_t payloadChecksumFail  = 0x81; // CRC-32 mismatch in InProgress
-static constexpr uint8_t notSupportedInState  = 0x82; // host OS at Standby (POST done)
-static constexpr uint8_t payloadIncomplete    = 0x83; // EndTransfer before all chunks received
-static constexpr uint8_t biosCapNotInit       = 0x85; // SetBIOSCap not yet called
-
-} // namespace cc
+// NOTE: SMBIOS transfer is NOT done over IPMI on this board.  The AMI host
+// BIOS pushes its SMBIOS table over the in-band Redfish Host Interface
+// (POST /redfish/v1/Systems/<id>/Smbios -> /var/lib/smbios/smbios2 ->
+// smbios-mdrv2 AgentSynchronizeData; see the bmcweb 0001-asrock-smbios-host-
+// interface-push patch).  The former IPMI MDR2 (NetFn 0x3E) and AMI-MDR
+// (NetFn 0x3A) command codes and handlers were removed — this firmware never
+// issues them (verified by boot-time KCS capture).
 
 } // namespace asrock
