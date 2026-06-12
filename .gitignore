@@ -8,5 +8,6 @@ customrc
 *.ima
 *.EXE
 *.zip
+*.log
 .claude/scheduled_tasks.lock
 compile_commands.json

@@ -48,7 +48,7 @@ diff --git a/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts b/arch/arm
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm/boot/dts/aspeed/aspeed-bmc-asrock-x570d4i2t.dts
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,463 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/dts-v1/;
 +#include "aspeed-g5.dtsi"
@@ -390,6 +390,24 @@ new file mode 100644
 +				reg = <0x3f88 6>;
 +			};
 +		};
++	};
++
++	/* DDR4 SPD EEPROMs (EE1004) - kernel drives SPA0/SPA1 page-select */
++	dimm0_spd: eeprom@50 {
++		compatible = "jedec,ee1004";
++		reg = <0x50>;
++	};
++	dimm1_spd: eeprom@51 {
++		compatible = "jedec,ee1004";
++		reg = <0x51>;
++	};
++	dimm2_spd: eeprom@52 {
++		compatible = "jedec,ee1004";
++		reg = <0x52>;
++	};
++	dimm3_spd: eeprom@53 {
++		compatible = "jedec,ee1004";
++		reg = <0x53>;
 +	};
 +};
 +

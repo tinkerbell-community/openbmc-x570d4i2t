@@ -28,17 +28,18 @@ SRC_URI = " \
     file://meson.build \
     file://meson.options \
     file://include/amiconverter.hpp \
+    file://include/amicommands.hpp \
     file://include/oemcommands.hpp \
-    file://include/spdreader.hpp \
     file://include/smbiosbuilder.hpp \
     file://src/amiconverter.cpp \
-    file://src/spdreader.cpp \
+    file://src/amicommands.cpp \
     file://src/smbiosbuilder.cpp \
     file://src/appcommands.cpp \
     file://src/chassiscommands.cpp \
     file://src/oemcommands.cpp \
     file://src/sensorcommands.cpp \
     file://src/storagecommands.cpp \
+    file://src/kcsmonitor.cpp \
     "
 
 S = "${UNPACKDIR}"

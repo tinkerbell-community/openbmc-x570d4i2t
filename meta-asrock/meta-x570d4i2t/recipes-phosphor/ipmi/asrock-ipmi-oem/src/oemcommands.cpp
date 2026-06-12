@@ -894,12 +894,14 @@ static std::string mdrHex(const std::vector<uint8_t>& v)
 static ipmi::RspType<std::vector<uint8_t>>
     ipmiProbeCmdHandler(ipmi::Context::ptr& ctx, std::vector<uint8_t> req)
 {
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "PROBE unhandled OEM cmd",
-        phosphor::logging::entry("NETFN=0x%02X", static_cast<unsigned>(ctx->netFn)),
-        phosphor::logging::entry("CMD=0x%02X",   static_cast<unsigned>(ctx->cmd)),
-        phosphor::logging::entry("REQ_BYTES=%zu", req.size()),
-        phosphor::logging::entry("REQ_HEX=%s",   mdrHex(req).c_str()));
+    // Put NetFn/Cmd/payload directly in the message text so the default journal
+    // view shows them (the structured entry() fields are hidden unless -o verbose).
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "PROBE unhandled OEM cmd NetFn=0x%02X Cmd=0x%02X len=%zu hex=[%s]",
+             static_cast<unsigned>(ctx->netFn),
+             static_cast<unsigned>(ctx->cmd), req.size(), mdrHex(req).c_str());
+    phosphor::logging::log<phosphor::logging::level::INFO>(msg);
     return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
 }
 
@@ -1186,12 +1188,28 @@ static ipmi::RspType<std::vector<uint8_t>>
         }
         else
         {
-            // Normal path: the BIOS only pushed OEM fields (0xB2 version,
-            // 0xB5 board name) and now commits. Synthesize the full table
-            // from those fields + FRU + DDR4 SPD + static board constants.
+            // Synthesis RE-ENABLED (Redfish-only). On commit we synthesize a
+            // complete table from the host fields just pushed (0xB2 BIOS version +
+            // 0xB5 board name) plus FRU + SPD + static board constants, persist it
+            // as MDR V2 (/var/lib/smbios/smbios2), and trigger smbios-mdrv2 — which
+            // makes it appear at /redfish/v1/Systems/system.
+            //
+            // NOTE: we do NOT set g_hasBiosPushedSmbios, so RegionStatus (0x71)
+            // keeps region 0 invalid and the BIOS stays in push-mode and never
+            // initiates the 0x72 GetBlock read-back. Serving that read-back puts
+            // the BIOS into a chunked-read loop that blocks the rest of its POST
+            // IPMI sequence, so the BMC-side table is for Redfish consumption only.
             if (rebuildAndPersistSmbios())
             {
-                g_hasBiosPushedSmbios = true;
+                phosphor::logging::log<phosphor::logging::level::INFO>(
+                    "MDR 0x5D phase=02: synthesized table from host fields + "
+                    "FRU/SPD, persisted + synced (Redfish /Systems populated)");
+            }
+            else
+            {
+                phosphor::logging::log<phosphor::logging::level::WARNING>(
+                    "MDR 0x5D phase=02: synthesis produced no table "
+                    "(BMC serves no table this commit)");
             }
         }
         g_oemState    = OemMdrState::Idle;
@@ -1214,7 +1232,7 @@ static ipmi::RspType<std::vector<uint8_t>>
         phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()),
         phosphor::logging::entry("STATE=%u", static_cast<uint8_t>(g_oemState)));
 
-    auto cached = ami::loadMdrPayload();
+    auto cached = smbiosbuild::getBiosMdrView();
     // Region 0 (SMBIOS table): only valid after BIOS completes a WriteEnd.
     // FRU-derived data doesn't count — returning valid=0 forces the BIOS
     // to push the full SMBIOS table rather than only sending meta updates.
@@ -1262,51 +1280,22 @@ static ipmi::RspType<std::vector<uint8_t>>
     uint8_t  regionId = req[0];
     uint16_t offset   = static_cast<uint16_t>(req[1]) | (static_cast<uint16_t>(req[2]) << 8);
 
+    // 0x72 GetBlock IS the BIOS reading the SMBIOS table back, but we deliberately
+    // return NO data: serving real chunks puts the BIOS into a multi-command
+    // chunked-read loop that blocks the remainder of its POST IPMI sequence.
+    // Returning empty keeps the BIOS in push-mode (it pushes 0xB2/0xB5 + commits
+    // 0x5D, which is what drives our synthesis) and lets POST proceed. The BMC
+    // still synthesizes + persists the table for smbios-mdr → /redfish/v1/Systems
+    // independently of this read-back path (see the 0x5D commit). The view size is
+    // logged so we can see what WOULD be served once chunked read-back is enabled.
+    size_t viewSize = smbiosbuild::getBiosMdrView().size();
     phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR 0x72 GetBlock",
+        "MDR 0x72 GetBlock — returning NO data (read-back intentionally disabled)",
         phosphor::logging::entry("REGION=%u", regionId),
         phosphor::logging::entry("OFFSET=0x%04X", offset),
+        phosphor::logging::entry("VIEW_BYTES=%zu", viewSize),
         phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
-
-    auto cached = ami::loadMdrPayload();
-
-    std::vector<uint8_t> source;
-    if (regionId == kOemRegionMeta)
-    {
-        // Synthesize a 4-byte mini meta-header [dataSize:2LE, checksum:2LE]
-        uint16_t sz  = static_cast<uint16_t>(cached.size());
-        uint16_t chk = ami::computeChecksum(cached.data(), cached.size());
-        source = {static_cast<uint8_t>(sz & 0xFF),
-                  static_cast<uint8_t>((sz >> 8) & 0xFF),
-                  static_cast<uint8_t>(chk & 0xFF),
-                  static_cast<uint8_t>((chk >> 8) & 0xFF)};
-    }
-    else if (regionId == kOemRegionSmbios)
-    {
-        source = cached;
-    }
-
-    if (source.empty() || offset >= source.size())
-    {
-        phosphor::logging::log<phosphor::logging::level::INFO>(
-            "MDR 0x72 GetBlock: empty/past-end",
-            phosphor::logging::entry("REGION=%u", regionId),
-            phosphor::logging::entry("SOURCE_SIZE=%zu", source.size()));
-        return ipmi::responseSuccess(std::vector<uint8_t>{});
-    }
-
-    constexpr size_t kChunk = 4096;
-    size_t sendLen = std::min(source.size() - offset, kChunk);
-    std::vector<uint8_t> rsp(source.begin() + offset,
-                              source.begin() + offset + sendLen);
-
-    phosphor::logging::log<phosphor::logging::level::INFO>(
-        "MDR 0x72 GetBlock RSP",
-        phosphor::logging::entry("REGION=%u", regionId),
-        phosphor::logging::entry("SEND_BYTES=%zu", sendLen),
-        phosphor::logging::entry("TOTAL=%zu", source.size()),
-        phosphor::logging::entry("HEAD_HEX=%s", mdrHex(rsp).c_str()));
-    return ipmi::responseSuccess(rsp);
+    return ipmi::responseSuccess(std::vector<uint8_t>{});
 }
 
 // ── 0xA0 SetMdrPos / BackupBmcMacDxe ────────────────────────────────────
@@ -1342,7 +1331,7 @@ static ipmi::RspType<std::vector<uint8_t>>
         phosphor::logging::entry("REGION=%u", regionId),
         phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
 
-    auto cached = ami::loadMdrPayload();
+    auto cached = smbiosbuild::getBiosMdrView();
     bool     valid = !cached.empty();
     uint16_t sz    = valid ? static_cast<uint16_t>(cached.size()) : 0;
     uint16_t chk   = valid ? ami::computeChecksum(cached.data(), cached.size()) : 0;
@@ -1444,6 +1433,74 @@ static ipmi::RspType<std::vector<uint8_t>>
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// AMI management OEM commands (NetFn 0x3A) seen at POST — named handlers.
+//
+// These four were previously caught by the generic probe (which returns
+// success+{0x00}); the BIOS is satisfied by that, so these handlers preserve
+// the exact same on-the-wire response (1-byte 0x00) while giving each command a
+// name, documentation, and a place to grow real behavior. Opcodes confirmed
+// against the stock firmware's sync-agent ipmi_commands.lua:
+//   0x81 CMD_AMI_GET_EMAILFORMAT_USER     — per-user alert email format
+//   0xAB CMD_AMI_VIRTUAL_DEVICE_GET_STATUS — virtual-media readiness
+//   0xBD CMD_AMI_SET_HOST_AUTO_LOCK_STATUS — host auto-lock phase ([01]/[02])
+//   0xBE CMD_AMI_GET_CHANNEL_TYPE          — interface type the cmd arrived on
+// None of these feed a Redfish resource in the stock Sync Agent, so they remain
+// functional no-ops here (documented, non-blocking). The exact response payload
+// formats are NOT documented in the available RE materials; the single 0x00
+// byte is retained because it is the empirically POST-validated response.
+// ═══════════════════════════════════════════════════════════════════════
+
+static constexpr ipmi::Cmd kAmiGetEmailFormatUser = 0x81;
+static constexpr ipmi::Cmd kAmiVirtualDevGetStatus = 0xAB;
+static constexpr ipmi::Cmd kAmiSetHostAutoLock     = 0xBD;
+static constexpr ipmi::Cmd kAmiGetChannelType      = 0xBE;
+
+// 0x81 — per-user email format (no Redfish mapping). Return plaintext (0x00).
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiGetEmailFormatUser(ipmi::Context::ptr& /*ctx*/,
+                              std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0x81 GetEmailFormatUser",
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// 0xAB — virtual-media readiness. No vmedia wired → report none (0x00).
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiVirtualDevGetStatus(ipmi::Context::ptr& /*ctx*/,
+                               std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0xAB VirtualDeviceGetStatus",
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// 0xBD — host auto-lock phase (req[0] = 0x01 begin / 0x02 end). Accept + ack.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiSetHostAutoLock(ipmi::Context::ptr& /*ctx*/,
+                           std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0xBD SetHostAutoLockStatus",
+        phosphor::logging::entry("PHASE=0x%02X", req.empty() ? 0 : req[0]),
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// 0xBE — interface type the command arrived on. We only serve KCS3 at POST.
+static ipmi::RspType<std::vector<uint8_t>>
+    ipmiAmiGetChannelType(ipmi::Context::ptr& /*ctx*/,
+                          std::vector<uint8_t> req)
+{
+    phosphor::logging::log<phosphor::logging::level::DEBUG>(
+        "AMI 0xBE GetChannelType",
+        phosphor::logging::entry("REQ_HEX=%s", mdrHex(req).c_str()));
+    return ipmi::responseSuccess(std::vector<uint8_t>{0x00});
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // end MDR SMBIOS hooks
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1462,31 +1519,31 @@ static void registerOEMFunctions()
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetInventory),
-                          ipmi::Privilege::User, ipmiGetInventory);
+                          ipmi::Privilege::Admin, ipmiGetInventory);
 
     // Sensor info (0x1E) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetSensorInfo),
-                          ipmi::Privilege::User, ipmiGetSensorInfo);
+                          ipmi::Privilege::Admin, ipmiGetSensorInfo);
 
     // Firmware version (0x20) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetFwVersion),
-                          ipmi::Privilege::User, ipmiGetFwVersion);
+                          ipmi::Privilege::Admin, ipmiGetFwVersion);
 
     // Firmware protocol (0x21) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdGetFwProtocol),
-                          ipmi::Privilege::User, ipmiGetFwProtocol);
+                          ipmi::Privilege::Admin, ipmiGetFwProtocol);
 
     // BMC config management (0x2B) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdManageBmcConfig),
-                          ipmi::Privilege::User, ipmiManageBmcConfig);
+                          ipmi::Privilege::Admin, ipmiManageBmcConfig);
 
     // SEL policy get (0x30) — Admin
     ipmi::registerHandler(ipmi::prioOemBase,
@@ -1498,19 +1555,19 @@ static void registerOEMFunctions()
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdMuxSwitching),
-                          ipmi::Privilege::User, ipmiMuxSwitching);
+                          ipmi::Privilege::Admin, ipmiMuxSwitching);
 
     // PECI read/write (0xE9) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdPeciReadWrite),
-                          ipmi::Privilege::User, ipmiPeciReadWrite);
+                          ipmi::Privilege::Admin, ipmiPeciReadWrite);
 
     // PSU info (0xEC) — User
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
                           static_cast<ipmi::Cmd>(general::cmdPsuInfo),
-                          ipmi::Privilege::User, ipmiPsuInfo);
+                          ipmi::Privilege::Admin, ipmiPsuInfo);
 
     // YAFU stubs (0x01–0x10) — Admin; return invalidCommand
     for (uint8_t cmd = general::cmdYafuAllocateMemory;
@@ -1556,6 +1613,25 @@ static void registerOEMFunctions()
                               kAmiGetStatus,    ipmi::Privilege::Admin, ipmiAmiGetStatus);
     }
 
+    // AMI management OEM commands seen at POST (NetFn 0x3A only) — named
+    // handlers at prioOemBase override the generic probe below.
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiGetEmailFormatUser, ipmi::Privilege::Admin,
+                          ipmiAmiGetEmailFormatUser);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiVirtualDevGetStatus, ipmi::Privilege::Admin,
+                          ipmiAmiVirtualDevGetStatus);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiSetHostAutoLock, ipmi::Privilege::Operator,
+                          ipmiAmiSetHostAutoLock);
+    ipmi::registerHandler(ipmi::prioOemBase,
+                          static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
+                          kAmiGetChannelType, ipmi::Privilege::Admin,
+                          ipmiAmiGetChannelType);
+
     phosphor::logging::log<phosphor::logging::level::INFO>(
         "ASRock MDR SMBIOS hooks registered (prioOemBase, NetFn 0x32+0x3A)");
 
@@ -1583,6 +1659,8 @@ static void registerOEMFunctions()
         // 0x73-0x9F
         0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
         0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+        // 0x81 also has a named handler on NetFn 0x3A (prioOemBase wins there);
+        // kept here so it still gets success on NetFn 0x32.
         0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
         0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
         0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
@@ -1590,6 +1668,8 @@ static void registerOEMFunctions()
         // 0xA2-0xB1, 0xB3-0xB4, 0xB6-0xF2, 0xF4-0xFE
         // (excl 0xA0 SetMdrPos, 0xA1 GetMdrStatus, 0xB2 SetBiosInfo, 0xB5 SetSmbiosChunk,
         //       0xF3 GetStatus, 0xE6 Inventory, 0xE9 Peci, 0xEC Psu, 0xEE Mux)
+        // 0xAB / 0xBD / 0xBE also have named handlers on NetFn 0x3A
+        // (prioOemBase wins there); kept here for NetFn 0x32 success coverage.
         0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9,
         0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
         0xB0, 0xB1, 0xB3, 0xB4,
@@ -1603,8 +1683,11 @@ static void registerOEMFunctions()
         0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xF6, 0xF7,
         0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE,
     };
-    for (auto probeNetFn : {static_cast<ipmi::NetFn>(ipmi::netFnOemTwo),
-                             static_cast<ipmi::NetFn>(ipmi::netFnOemSix)})
+    // NetFn 0x32 (NETFN_AMI) is owned by amicommands.cpp (named AMI stubs across
+    // the whole 0x32 space at prioOpenBmcBase); only probe NetFn 0x3A here so the
+    // two don't double-register at the same priority. MDR handlers on both
+    // NetFns stay at prioOemBase and win.
+    for (auto probeNetFn : {static_cast<ipmi::NetFn>(ipmi::netFnOemSix)})
     {
         for (uint8_t c : kProbeCmds)
         {

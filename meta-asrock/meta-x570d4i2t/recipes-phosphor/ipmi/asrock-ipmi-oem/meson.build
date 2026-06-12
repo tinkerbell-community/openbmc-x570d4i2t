@@ -51,13 +51,14 @@ asrock_oem_deps = [
 
 asrockoemcmds_src = [
     'src/amiconverter.cpp',
-    'src/spdreader.cpp',
+    'src/amicommands.cpp',
     'src/smbiosbuilder.cpp',
     'src/appcommands.cpp',
     'src/chassiscommands.cpp',
     'src/oemcommands.cpp',
     'src/sensorcommands.cpp',
     'src/storagecommands.cpp',
+    'src/kcsmonitor.cpp',
 ]
 
 library(

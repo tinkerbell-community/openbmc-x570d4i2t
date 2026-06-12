@@ -333,7 +333,7 @@ static void registerChassisCommands()
     ipmi::registerHandler(ipmi::prioOemBase,
                           ipmi::netFnChassis,
                           static_cast<ipmi::Cmd>(0x01),
-                          ipmi::Privilege::User, ipmiGetChassisStatus);
+                          ipmi::Privilege::Admin, ipmiGetChassisStatus);
 
     // ChassisIdentify (0x04) — Operator
     ipmi::registerHandler(ipmi::prioOemBase,
@@ -345,7 +345,7 @@ static void registerChassisCommands()
     ipmi::registerHandler(ipmi::prioOemBase,
                           ipmi::netFnChassis,
                           static_cast<ipmi::Cmd>(0x07),
-                          ipmi::Privilege::User, ipmiGetSystemRestartCause);
+                          ipmi::Privilege::Admin, ipmiGetSystemRestartCause);
 }
 
 } // namespace asrock

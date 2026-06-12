@@ -5,7 +5,6 @@
 
 #include <smbiosbuilder.hpp>
 #include <amiconverter.hpp>
-#include <spdreader.hpp>
 
 #include <ipmid/api.hpp>
 #include <ipmid/utils.hpp>
@@ -14,6 +13,8 @@
 
 #include <array>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <variant>
@@ -38,34 +39,188 @@ std::string g_boardName;       // e.g. "X570D4I-2T"
 // Cache: the table is rebuilt (running the expensive SPD/FRU reads) only when a
 // host field actually changes. g_dirty starts true so the first build runs.
 bool                 g_dirty = true;
-std::vector<uint8_t> g_cachedTable;
+std::vector<uint8_t> g_cachedTable;   // smbios-mdr view: [structs][_SM3_ EP]
+std::vector<uint8_t> g_cachedBiosView; // BIOS view:       [_SM3_ EP][structs]
+
+// The host only pushes its OEM fields (BIOS version via 0xB2, board name via
+// 0xB5) on a COLD boot. On a warm reboot it just reads the table back, and an
+// ipmid restart (e.g. a redeploy) would otherwise lose the version -> Type 0
+// regresses to "Unknown". Persist the captured fields so they survive both.
+constexpr const char* kStateDir  = "/var/lib/asrock-ipmi-oem";
+constexpr const char* kStateFile = "/var/lib/asrock-ipmi-oem/hostfields";
+bool g_loaded = false;
+
+void persistFields()
+{
+    try
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(kStateDir, ec);
+        std::ofstream f(kStateFile, std::ios::trunc);
+        if (!f)
+            return;
+        // One "key=value" per line; captured values never contain newlines.
+        f << "version=" << g_biosVersion << '\n'
+          << "date=" << g_biosReleaseDate << '\n'
+          << "board=" << g_boardName << '\n';
+    }
+    catch (const std::exception&)
+    {
+    }
+}
+
+// Seed the in-memory fields from disk once, so a fresh ipmid (or a warm reboot
+// with no host push) still builds a table carrying the last-known values. Only
+// fills fields that are currently empty — a live host push always wins.
+void ensureLoaded()
+{
+    if (g_loaded)
+        return;
+    g_loaded = true;
+    try
+    {
+        std::ifstream f(kStateFile);
+        if (!f)
+            return;
+        std::string line;
+        while (std::getline(f, line))
+        {
+            auto eq = line.find('=');
+            if (eq == std::string::npos)
+                continue;
+            std::string key = line.substr(0, eq);
+            std::string val = line.substr(eq + 1);
+            if (val.empty())
+                continue;
+            if (key == "version" && g_biosVersion.empty())
+                g_biosVersion = val;
+            else if (key == "date" && g_biosReleaseDate.empty())
+                g_biosReleaseDate = val;
+            else if (key == "board" && g_boardName.empty())
+                g_boardName = val;
+        }
+    }
+    catch (const std::exception&)
+    {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DIMM inventory — file-backed, NO i2c.
+//
+// The custom raw-i2c SPD reader was removed: the host BIOS is a pure consumer
+// of the BMC's SMBIOS table (verified by busctl-monitoring a cold boot — the
+// host issues only GetBlock reads, never a write), so DIMM detail cannot come
+// from the host over IPMI, and live SPD i2c was fragile (the SoC owns the bus
+// after memory training). DIMM data now comes solely from a static file written
+// out-of-band: `/var/lib/asrock-ipmi-oem/dimms`, one tab-separated record per
+// populated slot. If the file is absent the memory slots are emitted as
+// present-but-unknown (Type 17 size 0xFFFF). This file is also the intended
+// landing spot for a future host-push path.
+//
+// Record columns (tab-separated):
+//   slotIndex  spdAddr  sizeMiB  speedMTs  ranks  deviceWidth  busWidthBits
+//   ecc(0/1)   smbiosMemType  jedecMfrId  manufacturer  partNumber  serial
+// ---------------------------------------------------------------------------
+constexpr const char* kDimmFile = "/var/lib/asrock-ipmi-oem/dimms";
+constexpr uint8_t     kSmbiosTypeDDR4 = 0x1A;
+
+struct DimmInfo
+{
+    uint8_t     slotIndex    = 0;
+    uint32_t    sizeMiB      = 0;
+    uint16_t    speedMTs     = 0;
+    uint8_t     ranks        = 0;
+    uint8_t     busWidthBits = 64;
+    bool        ecc          = false;
+    uint8_t     smbiosMemType = kSmbiosTypeDDR4;
+    uint16_t    jedecMfrId   = 0;
+    std::string manufacturer;
+    std::string partNumber;
+    std::string serial;
+};
+
+std::map<uint8_t, DimmInfo> loadDimms()
+{
+    std::map<uint8_t, DimmInfo> out; // keyed by slotIndex
+    try
+    {
+        std::ifstream f(kDimmFile);
+        if (!f)
+            return out;
+        std::string line;
+        while (std::getline(f, line))
+        {
+            if (line.empty())
+                continue;
+            std::vector<std::string> c;
+            size_t start = 0;
+            for (;;)
+            {
+                size_t tab = line.find('\t', start);
+                c.push_back(line.substr(start, tab - start));
+                if (tab == std::string::npos)
+                    break;
+                start = tab + 1;
+            }
+            if (c.size() < 13)
+                continue;
+            DimmInfo d;
+            d.slotIndex     = static_cast<uint8_t>(std::stoul(c[0]));
+            d.sizeMiB       = static_cast<uint32_t>(std::stoul(c[2]));
+            d.speedMTs      = static_cast<uint16_t>(std::stoul(c[3]));
+            d.ranks         = static_cast<uint8_t>(std::stoul(c[4]));
+            d.busWidthBits  = static_cast<uint8_t>(std::stoul(c[6]));
+            d.ecc           = (c[7] != "0");
+            d.smbiosMemType = static_cast<uint8_t>(std::stoul(c[8]));
+            d.jedecMfrId    = static_cast<uint16_t>(std::stoul(c[9]));
+            d.manufacturer  = c[10];
+            d.partNumber    = c[11];
+            d.serial        = c[12];
+            out[d.slotIndex] = d;
+        }
+    }
+    catch (const std::exception&)
+    {
+    }
+    return out;
+}
 } // namespace
 
 void setHostBios(const std::string& version, const std::string& releaseDate)
 {
+    ensureLoaded();
+    bool changed = false;
     if (!version.empty() && version != g_biosVersion)
     {
         g_biosVersion = version;
         g_dirty = true;
+        changed = true;
     }
     if (!releaseDate.empty() && releaseDate != g_biosReleaseDate)
     {
         g_biosReleaseDate = releaseDate;
         g_dirty = true;
+        changed = true;
     }
+    if (changed)
+        persistFields();
 }
 
 void setHostBoardName(const std::string& productName)
 {
+    ensureLoaded();
     if (!productName.empty() && productName != g_boardName)
     {
         g_boardName = productName;
         g_dirty = true;
+        persistFields();
     }
 }
 
 bool needsRebuild()
 {
+    ensureLoaded();
     return g_dirty || g_cachedTable.empty();
 }
 
@@ -92,8 +247,8 @@ constexpr uint16_t kHandleMemArray = 0x1000;
 constexpr uint16_t kHandleDimmBase = 0x1100;
 constexpr uint16_t kHandleEnd    = 0x7f00;
 
-// DIMM SPD address -> SMBIOS Device Locator (board silkscreen). Order matches
-// i2c-7 0x50..0x53; confirm against board if channel mapping ever looks wrong.
+// Slot index -> SMBIOS Device Locator (board silkscreen). Slot index is the key
+// in the static dims file; A1/A2/B1/B2 = slots 0..3.
 const std::array<const char*, 4> kDimmLocators = {
     "CPU1_DIMM_A1", "CPU1_DIMM_A2", "CPU1_DIMM_B1", "CPU1_DIMM_B2"};
 
@@ -249,6 +404,63 @@ std::string firstNonEmpty(const std::string& a, const std::string& b,
     return c;
 }
 
+// Build a 24-byte SMBIOS 3.0 entry point (EntryPointStructure30) with a valid
+// checksum. The stock AMI dump uses this exact format (version 3.0, epRev 1).
+std::vector<uint8_t> makeSm3EntryPoint(uint32_t structTableLen,
+                                       uint64_t structTableAddr)
+{
+    std::vector<uint8_t> ep;
+    const char* anchor = "_SM3_";
+    ep.insert(ep.end(), anchor, anchor + 5); // [0-4] "_SM3_"
+    ep.push_back(0x00);                       // [5]   checksum (filled below)
+    ep.push_back(0x18);                       // [6]   epLength = 24
+    ep.push_back(0x03);                       // [7]   SMBIOS major = 3
+    ep.push_back(0x00);                       // [8]   SMBIOS minor = 0
+    ep.push_back(0x00);                       // [9]   doc rev
+    ep.push_back(0x01);                       // [10]  entry point revision
+    ep.push_back(0x00);                       // [11]  reserved
+    for (int i = 0; i < 4; ++i)               // [12-15] struct table max size
+        ep.push_back(static_cast<uint8_t>((structTableLen >> (8 * i)) & 0xFF));
+    for (int i = 0; i < 8; ++i)               // [16-23] struct table address
+        ep.push_back(static_cast<uint8_t>((structTableAddr >> (8 * i)) & 0xFF));
+    uint8_t sum = 0;
+    for (uint8_t b : ep)
+        sum = static_cast<uint8_t>(sum + b);
+    ep[5] = static_cast<uint8_t>(0u - sum);   // make the 24-byte sum == 0
+    return ep;
+}
+
+// Extract the structure table (Type 0 .. Type 127 inclusive) from a payload,
+// dropping any trailing entry point. Walks structures to the End-of-Table.
+std::vector<uint8_t> extractCore(const std::vector<uint8_t>& payload)
+{
+    size_t off = 0;
+    while (off + 4 <= payload.size())
+    {
+        uint8_t type = payload[off];
+        uint8_t len = payload[off + 1];
+        if (len < 4 || off + len > payload.size())
+            break;
+        size_t p = off + len;
+        // skip the string-set (terminated by a double NUL)
+        if (p + 1 < payload.size() && payload[p] == 0 && payload[p + 1] == 0)
+        {
+            p += 2;
+        }
+        else
+        {
+            while (p + 1 < payload.size() &&
+                   !(payload[p] == 0 && payload[p + 1] == 0))
+                ++p;
+            p += 2;
+        }
+        if (type == 127)
+            return std::vector<uint8_t>(payload.begin(), payload.begin() + p);
+        off = p;
+    }
+    return payload; // fallback: hand back whatever we got
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -256,6 +468,10 @@ std::string firstNonEmpty(const std::string& a, const std::string& b,
 // ---------------------------------------------------------------------------
 std::vector<uint8_t> buildSmbiosTable()
 {
+    // Seed last-known host fields from disk so a fresh ipmid / warm reboot still
+    // emits Type 0 BIOS version etc. instead of regressing to "Unknown".
+    ensureLoaded();
+
     // Fast path: nothing changed since the last build — return the cached table
     // (no SPD/FRU I/O). Keeps repeated 0x5D commits cheap and byte-stable.
     if (!g_dirty && !g_cachedTable.empty())
@@ -264,7 +480,7 @@ std::vector<uint8_t> buildSmbiosTable()
     }
 
     FruInfo fru = readFru();
-    auto dimms = spd::readAllDimms();
+    auto dimms = loadDimms(); // file-backed, no i2c
 
     std::string sysMfr = firstNonEmpty(fru.productManufacturer,
                                        fru.boardManufacturer, kSysManufacturer);
@@ -390,88 +606,78 @@ std::vector<uint8_t> buildSmbiosTable()
     }
 
     // ---- Type 16: Physical Memory Array ----
-    int populated = 0;
-    uint64_t totalKb = 0;
-    for (const auto& d : dimms)
-        if (d.present)
-        {
-            ++populated;
-            totalKb += static_cast<uint64_t>(d.sizeMiB) * 1024;
-        }
+    int populated = static_cast<int>(dimms.size());
     bool anyEcc = false;
-    for (const auto& d : dimms)
-        anyEcc = anyEcc || (d.present && d.ecc);
+    for (const auto& [slot, d] : dimms)
+        anyEcc = anyEcc || d.ecc;
     {
         StructWriter s(16, kHandleMemArray);
         s.u8(0x03);             // location: System board
         s.u8(0x03);             // use: System memory
         s.u8(anyEcc ? 0x06 : 0x03); // error correction: Multi-bit ECC / None
-        // maximum capacity (KB); if > 2 TB use extended field. Board max 128 GB.
-        uint64_t maxKb = (totalKb > 0) ? totalKb
-                                       : (128ull * 1024 * 1024);
-        if (maxKb < 0x80000000ull)
-            s.u32(static_cast<uint32_t>(maxKb));
-        else
-            s.u32(0x80000000);
+        // maximum capacity: board static max 128 GB (4 x 32 GB UDIMM).
+        s.u32(static_cast<uint32_t>(128ull * 1024 * 1024));
         s.u16(0xFFFE);          // memory error info handle: not provided
-        s.u16(static_cast<uint16_t>(dimms.size())); // number of slots
-        s.u64(maxKb < 0x80000000ull ? 0 : maxKb * 1024); // extended max (bytes)
+        s.u16(static_cast<uint16_t>(kDimmLocators.size())); // number of slots
+        s.u64(0);               // extended max capacity (n/a, < 2 TB)
         s.flush(out);
     }
 
-    // ---- Type 17: Memory Device (one per slot) ----
-    for (size_t i = 0; i < dimms.size(); ++i)
+    // ---- Type 17: Memory Device (one per physical slot) ----
+    // DIMM detail is sourced only from the static dims file (no i2c). The host
+    // BIOS does not push DIMM data over IPMI, so a slot absent from the file is
+    // emitted as present-but-unknown (size 0xFFFF) rather than fabricated.
+    for (size_t i = 0; i < kDimmLocators.size(); ++i)
     {
-        const auto& d = dimms[i];
+        auto it = dimms.find(static_cast<uint8_t>(i));
+        bool known = (it != dimms.end());
+        const DimmInfo* d = known ? &it->second : nullptr;
         StructWriter s(17, static_cast<uint16_t>(kHandleDimmBase + i));
         s.u16(kHandleMemArray); // physical memory array handle
         s.u16(0xFFFE);          // memory error info handle: not provided
-        uint16_t totalWidth = d.present ? (d.ecc ? 72 : 64) : 0xFFFF;
-        uint16_t dataWidth  = d.present ? 64 : 0xFFFF;
-        s.u16(totalWidth);
-        s.u16(dataWidth);
-        // size: MB if < 0x7FFF, else 0x7FFF + extendedSize
-        uint32_t mib = d.present ? d.sizeMiB : 0;
-        if (!d.present)
-            s.u16(0);           // size 0 = slot empty
+        s.u16(known ? (d->ecc ? 72 : 64) : 0xFFFF); // total width
+        s.u16(known ? 64 : 0xFFFF);                  // data width
+        // size: known -> MB (saturate at 0x7FFF + extended); unknown -> 0xFFFF
+        uint32_t mib = known ? d->sizeMiB : 0;
+        if (!known)
+            s.u16(0xFFFF);      // size unknown
         else if (mib < 0x7FFF)
             s.u16(static_cast<uint16_t>(mib));
         else
             s.u16(0x7FFF);
         s.u8(0x09);             // form factor: DIMM
         s.u8(0);                // device set
-        uint8_t locIdx = s.str(i < kDimmLocators.size() ? kDimmLocators[i]
-                                                        : "DIMM");
+        uint8_t locIdx = s.str(kDimmLocators[i]);
         uint8_t bankIdx = s.str("P0_Node0");
         s.u8(locIdx);
         s.u8(bankIdx);
-        s.u8(d.present ? spd::kSmbiosTypeDDR4 : 0x02); // memory type DDR4/Unknown
-        s.u16(d.present ? 0x0080 : 0x0000); // type detail: Synchronous
-        s.u16(d.present ? d.speedMTs : 0);  // speed (MT/s)
-        uint8_t mfrIdx  = d.present ? s.str(d.manufacturer) : 0;
-        uint8_t serIdx  = d.present ? s.str(d.serial) : 0;
+        s.u8(known ? d->smbiosMemType : kSmbiosTypeDDR4); // memory type DDR4
+        s.u16(0x0080);          // type detail: Synchronous
+        s.u16(known ? d->speedMTs : 0);  // speed (MT/s), 0 = unknown
+        uint8_t mfrIdx  = known ? s.str(d->manufacturer) : 0;
+        uint8_t serIdx  = known ? s.str(d->serial) : 0;
         uint8_t assetIdx = 0;
-        uint8_t partIdx = d.present ? s.str(d.partNumber) : 0;
+        uint8_t partIdx = known ? s.str(d->partNumber) : 0;
         s.u8(mfrIdx);
         s.u8(serIdx);
         s.u8(assetIdx);
         s.u8(partIdx);
-        s.u8(d.present ? d.ranks : 0); // attributes: rank in low nibble
+        s.u8(known ? d->ranks : 0); // attributes: rank in low nibble
         // extended size (MB) when size field saturated
-        s.u32((d.present && mib >= 0x7FFF) ? mib : 0);
-        s.u16(d.present ? d.speedMTs : 0); // configured memory speed
+        s.u32((known && mib >= 0x7FFF) ? mib : 0);
+        s.u16(known ? d->speedMTs : 0); // configured memory speed
         s.u16(1200);            // minimum voltage (mV)
         s.u16(1200);            // maximum voltage
         s.u16(1200);            // configured voltage
-        s.u8(d.present ? 0x03 : 0x02); // memory technology: DRAM / Unknown
+        s.u8(0x03);             // memory technology: DRAM
         s.u16(0x0000);          // memory operating mode capability
         s.u8(0);                // firmware version (string ref, none)
-        s.u16(d.present ? d.jedecMfrId : 0); // module manufacturer ID
+        s.u16(known ? d->jedecMfrId : 0); // module manufacturer ID
         s.u16(0);               // module product ID
         s.u16(0);               // memory subsystem controller mfr ID
         s.u16(0);               // memory subsystem controller product ID
         s.u64(0);               // non-volatile size
-        s.u64(d.present ? static_cast<uint64_t>(mib) * 1024 * 1024 : 0); // volatile
+        s.u64(known ? static_cast<uint64_t>(mib) * 1024 * 1024 : 0); // volatile
         s.u64(0);               // cache size
         s.u64(0);               // logical size
         s.flush(out);
@@ -483,68 +689,62 @@ std::vector<uint8_t> buildSmbiosTable()
         s.flush(out);
     }
 
-    // ---- SMBIOS 3.0 entry point, appended AFTER the structure table ----
-    // smbios-mdr's checkSMBIOSVersion() searches the whole region for a "_SM_"
-    // or "_SM3_" anchor and reads the version from the entry point. Placing it
-    // here (not at offset 0) keeps the parsers' getSMBIOSTypePtr() walking the
-    // structure table from offset 0, while still satisfying the version check.
-    {
-        uint32_t structTableLen = static_cast<uint32_t>(out.size());
-        size_t epStart = out.size();
-        const char* anchor = "_SM3_";
-        out.insert(out.end(), anchor, anchor + 5); // anchorString[5]
-        out.push_back(0x00);                        // epChecksum (not validated)
-        out.push_back(0x18);                        // epLength = 24
-        out.push_back(0x03);                        // SMBIOS major version
-        out.push_back(0x05);                        // SMBIOS minor version
-        out.push_back(0x00);                        // SMBIOS doc rev
-        out.push_back(0x01);                        // entry point revision
-        out.push_back(0x00);                        // reserved
-        for (int i = 0; i < 4; ++i)                 // structTableMaxSize (u32 LE)
-            out.push_back(static_cast<uint8_t>((structTableLen >> (8 * i)) & 0xFF));
-        for (int i = 0; i < 8; ++i)                 // structTableAddr (u64) = 0
-            out.push_back(0x00);
-        // fix checksum so the entry point byte-sum is 0 (cosmetic; not checked).
-        uint8_t sum = 0;
-        for (size_t i = epStart; i < out.size(); ++i)
-            sum = static_cast<uint8_t>(sum + out[i]);
-        out[epStart + 5] = static_cast<uint8_t>(0x100 - sum);
-    }
+    // `out` is now the core structure table (Type 0 .. Type 127). Build the two
+    // views the two consumers need from it:
+    //
+    //  - smbios-mdr (the /var/lib/smbios/smbios2 file): structures at offset 0
+    //    (getSMBIOSTypePtr walks from there) + a "_SM3_" anchor APPENDED so
+    //    checkSMBIOSVersion's whole-buffer search still finds a version.
+    //
+    //  - the AMI host BIOS (read back via 0x72 GetBlock): a STANDARD SMBIOS dump
+    //    with the "_SM3_" entry point FIRST, then the structures — byte-for-byte
+    //    the shape the stock firmware served, which the BIOS validates on POST.
+    std::vector<uint8_t> core = out;
+    uint32_t coreLen = static_cast<uint32_t>(core.size());
+
+    // smbios-mdr view: core + trailing entry point.
+    auto trailingEp = makeSm3EntryPoint(coreLen, /*addr*/ 0);
+    out.insert(out.end(), trailingEp.begin(), trailingEp.end());
+
+    // BIOS view: entry point (structs follow it at offset 24) + core.
+    std::vector<uint8_t> biosView = makeSm3EntryPoint(coreLen, /*addr*/ 0x18);
+    biosView.insert(biosView.end(), core.begin(), core.end());
 
     log<level::INFO>("smbiosbuild::buildSmbiosTable: assembled",
-                     entry("BYTES=%zu", out.size()),
+                     entry("MDR_BYTES=%zu", out.size()),
+                     entry("BIOS_BYTES=%zu", biosView.size()),
                      entry("DIMMS=%d", populated),
                      entry("BIOS=%s", g_biosVersion.c_str()),
                      entry("PRODUCT=%s", sysProd.c_str()));
 
     // Cache and mark clean so subsequent commits fast-path until a field changes.
-    if (populated > 0)
-    {
-        g_cachedTable = out;
-        g_dirty = false;
-        return out;
-    }
+    // DIMM detail is now file-backed (deterministic) rather than read from flaky
+    // i2c, so there is no empty-SPD regression to guard against: always cache.
+    g_cachedTable = out;
+    g_cachedBiosView = biosView;
+    g_dirty = false;
+    return out;
+}
 
-    // No DIMMs read. On AMD the SoC claims the SPD SMBus after memory training,
-    // so SPD is only readable early in POST / host-off; a runtime read returns
-    // nothing. NEVER regress a previously-good table to an empty one — keep
-    // serving the last good table (in-memory cache, else the on-disk copy).
-    // Leave g_dirty as-is (do NOT freeze): keep retrying so the next POST, when
-    // SPD is readable again, rebuilds with real DIMMs.
-    if (!g_cachedTable.empty())
+std::vector<uint8_t> getBiosMdrView()
+{
+    if (!g_cachedBiosView.empty())
     {
-        log<level::WARNING>(
-            "buildSmbiosTable: SPD empty (bus claimed by SoC?), keeping cached table");
-        return g_cachedTable;
+        return g_cachedBiosView;
     }
-    auto onDisk = ami::loadMdrPayload();
-    if (!onDisk.empty())
+    // Cold cache (e.g. the BIOS reads the table back before its first push, or
+    // ipmid just restarted). Derive the BIOS view from the on-disk smbios2: take
+    // its structure table and prepend a "_SM3_" entry point.
+    auto core = extractCore(ami::loadMdrPayload());
+    if (core.empty())
     {
-        log<level::WARNING>(
-            "buildSmbiosTable: SPD empty, retaining existing on-disk table");
-        return onDisk;
+        return {};
     }
-    return out; // never had a good table — best effort (empty DIMMs)
+    std::vector<uint8_t> view =
+        makeSm3EntryPoint(static_cast<uint32_t>(core.size()), 0x18);
+    view.insert(view.end(), core.begin(), core.end());
+    g_cachedBiosView = view;
+    return view;
 }
 
 } // namespace smbiosbuild

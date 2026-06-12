@@ -213,7 +213,7 @@ static void registerSensorCommands()
     ipmi::registerHandler(ipmi::prioOemBase,
                           ipmi::netFnSensor,
                           static_cast<ipmi::Cmd>(0x02),
-                          ipmi::Privilege::Operator, ipmiSenPlatformEvent);
+                          ipmi::Privilege::Admin, ipmiSenPlatformEvent);
 }
 
 } // namespace asrock

@@ -506,20 +506,20 @@ static void registerAppCommands()
         "ASRock App commands registered (NetFn 0x06)");
 
     ipmi::registerHandler(ipmi::prioOemBase, ipmi::netFnApp,
-                          ipmi::app::cmdGetDeviceId, ipmi::Privilege::User,
+                          ipmi::app::cmdGetDeviceId, ipmi::Privilege::Admin,
                           ipmiGetDeviceId);
 
     ipmi::registerHandler(ipmi::prioOemBase, ipmi::netFnApp,
                           ipmi::app::cmdGetSelfTestResults,
-                          ipmi::Privilege::User, ipmiGetSelfTestResults);
+                          ipmi::Privilege::Admin, ipmiGetSelfTestResults);
 
     ipmi::registerHandler(ipmi::prioOemBase, ipmi::netFnApp,
-                          ipmi::app::cmdGetSystemGuid, ipmi::Privilege::User,
+                          ipmi::app::cmdGetSystemGuid, ipmi::Privilege::Admin,
                           ipmiGetSystemGuid);
 
     // GetDevGuid (0x08) — older alias, same response as GetSystemGuid
     ipmi::registerHandler(ipmi::prioOemBase, ipmi::netFnApp,
-                          ipmi::app::cmdGetDeviceGuid, ipmi::Privilege::User,
+                          ipmi::app::cmdGetDeviceGuid, ipmi::Privilege::Admin,
                           ipmiGetSystemGuid);
 
     phosphor::logging::log<phosphor::logging::level::INFO>(
