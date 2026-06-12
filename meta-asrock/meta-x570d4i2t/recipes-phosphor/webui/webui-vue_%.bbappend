@@ -1,10 +1,7 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/${BPN}:"
 
-SRC_URI:append = " \
-    file://0001-Add-color-mode-type-media-query.patch \
-    "
-
-# NOTE: 0002-Use-css-variables-in-custom-scss.patch is temporarily disabled — it
-# no longer applies against the current webui-vue revision (stale _card.scss hunk,
-# malformed git blob indices) and blocks the image build. Re-add it here once
-# rebased to restore the Bootstrap-5 css-variable theming.
+# Build the web UI from the pi-bmc fork instead of openbmc/webui-vue upstream.
+# Override both the git URL and SRCREV — the upstream recipe pins its own
+# SRCREV, so it must be overridden in lockstep with the URL.
+SRC_URI = "git://github.com/pi-bmc/webui-vue.git;branch=master;protocol=https"
+SRCREV = "9777cd0a3832390765d0ae4571c2783ceb3165e6"
