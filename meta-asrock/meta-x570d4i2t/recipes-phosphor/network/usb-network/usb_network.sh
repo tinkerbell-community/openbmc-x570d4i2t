@@ -10,20 +10,17 @@
 GADGET=/sys/kernel/config/usb_gadget/usbnet
 FUNC="$GADGET/functions/rndis.usbnet"
 
-# Get MAC Address from uboot, or fallback to a fixed locally-administered MAC
-ENV_MAC_ADDR=
-ENV_MAC_ADDR=${ENV_MAC_ADDR:-"9C:6B:00:4E:1C:2A"}
-ENV_MAC_ADDR=${ENV_MAC_ADDR:-"9C:6B:00:70:57:A4"}
-MAC_ADDR=${ENV_MAC_ADDR:-"9C:6B:00:70:57:A4"}
-
-# Generate MAC Address using locally administered MAC
-# https://en.wikipedia.org/wiki/MAC_address#Universal_vs._local_(U/L_bit
-SUBMAC=$(echo "$MAC_ADDR" | cut -d ":" -f 2-5)
+# Fixed locally-administered MACs for the usb0 gadget. This board has no readable
+# u-boot ethaddr, so use stable literals rather than deriving from fw_printenv.
+# BMC side (dev_addr) and host side (host_addr); both have the locally-administered
+# bit set (0x02 in the first octet: 0x9C & 0x02).
+BMC_MAC="9C:6B:00:4E:1C:2A"
+HOST_MAC="9C:6B:00:70:57:A4"
 
 # (Re)create the gadget with the RNDIS function. usb-ctrl supports rndis natively
 # (functions/rndis.<name>); the off is tolerated when no gadget exists yet.
 /usr/bin/usb-ctrl rndis usbnet off 2>/dev/null || true
-/usr/bin/usb-ctrl rndis usbnet on "9C:6B:00:4E:1C:2A" "9C:6B:00:70:57:A4"
+/usr/bin/usb-ctrl rndis usbnet on "$BMC_MAC" "$HOST_MAC"
 
 # usb-ctrl leaves the device descriptor generic (class 0x00, idProduct 0x0104 =
 # "Multifunction Composite Gadget") and binds the UDC. Re-stamp it as a dedicated
