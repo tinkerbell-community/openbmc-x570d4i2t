@@ -15,8 +15,8 @@ SRC_URI += "file://usb-network.service \
             file://00-bmc-usb0.network"
 
 do_install() {
-    install -d ${D}${systemd_unitdir}/system/
-    install -m 0644 ${UNPACKDIR}/usb-network.service ${D}${systemd_unitdir}/system
+    install -d ${D}${systemd_system_unitdir}
+    install -m 0644 ${UNPACKDIR}/usb-network.service ${D}${systemd_system_unitdir}
 
     install -d ${D}${sysconfdir_native}/systemd/network/
     install -m 0644 ${UNPACKDIR}/00-bmc-usb0.network ${D}${sysconfdir_native}/systemd/network
@@ -28,3 +28,7 @@ do_install() {
 NATIVE_SYSTEMD_SUPPORT = "1"
 SYSTEMD_PACKAGES = "${PN}"
 SYSTEMD_SERVICE:${PN} = "usb-network.service"
+# Enable at boot explicitly (don't rely on the default). This bakes the
+# multi-user.target.wants symlink and a "98-usb-network.preset: enable" entry
+# into the image so the gadget comes up without a manual `systemctl enable`.
+SYSTEMD_AUTO_ENABLE:${PN} = "enable"
