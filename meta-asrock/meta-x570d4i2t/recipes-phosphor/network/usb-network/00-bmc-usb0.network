@@ -9,6 +9,7 @@ Name=usb0
 # an address whose Origin matches the channel's DHCP state — with DHCP on it looks
 # for a DHCP-origin address and ignores our Static one, returning 0.0.0.0.
 ConfigureWithoutCarrier=yes
+IgnoreCarrierLoss=true
 DHCP=no
 LinkLocalAddressing=no
 IPv6AcceptRA=no
