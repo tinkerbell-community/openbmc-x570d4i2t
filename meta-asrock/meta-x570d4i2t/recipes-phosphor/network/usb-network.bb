@@ -6,7 +6,7 @@ LIC_FILES_CHKSUM = "file://${COREBASE}/meta/files/common-licenses/Apache-2.0;md5
 DEPENDS += "systemd"
 RDEPENDS:${PN} += "libsystemd bash"
 
-S = "${UNPACKDIR}/sources"
+S = "${UNPACKDIR}"
 
 inherit allarch systemd
 
