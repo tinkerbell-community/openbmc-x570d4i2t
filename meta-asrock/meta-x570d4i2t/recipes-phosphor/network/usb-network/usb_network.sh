@@ -42,3 +42,15 @@ ln -s functions/ncm.usb0 configs/c.1/
 # The AST2500 vhub exposes its virtual ports as UDCs (USB Device Controllers).
 # "1e6a0000.usb-vhub:p1" is Port 1 of the AST2500 vhub.
 echo "1e6a0000.usb-vhub:p1" > UDC
+
+# 8. Assign the BMC-side IP directly with iproute2.
+# Binding the UDC creates the usb0 netdev asynchronously, so wait for it to
+# appear before configuring. `ip addr replace` is idempotent (safe under set -e
+# on a service restart, unlike `ip addr add` which fails if the addr exists).
+for _ in $(seq 1 50); do
+    [ -e /sys/class/net/usb0 ] && break
+    sleep 0.1
+done
+
+ip link set usb0 up
+ip addr replace 169.254.0.17/16 dev usb0
