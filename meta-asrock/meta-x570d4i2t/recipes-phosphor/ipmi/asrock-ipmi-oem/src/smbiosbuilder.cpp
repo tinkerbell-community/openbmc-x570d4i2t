@@ -245,6 +245,7 @@ constexpr uint16_t kHandleChassis = 0x0003;
 constexpr uint16_t kHandleCpu    = 0x0004;
 constexpr uint16_t kHandleMemArray = 0x1000;
 constexpr uint16_t kHandleDimmBase = 0x1100;
+constexpr uint16_t kHandleHostIface = 0x4200;
 constexpr uint16_t kHandleEnd    = 0x7f00;
 
 // Slot index -> SMBIOS Device Locator (board silkscreen). Slot index is the key
@@ -462,6 +463,78 @@ std::vector<uint8_t> extractCore(const std::vector<uint8_t>& payload)
 }
 
 } // namespace
+
+// Build a complete SMBIOS Type 42 (Management Controller Host Interface)
+// structure advertising the in-band USB-network (RNDIS) Redfish Host Interface,
+// per DMTF DSP0270, so a host OS can auto-discover the BMC over usb0. Returns a
+// whole appendable structure: formatted area + terminating double-NULL (no text
+// strings). Splice it in immediately before the Type 127 end-of-table struct.
+//
+// Interface = Network Host Interface (0x40), USB device descriptor for the
+// Linux-gadget RNDIS NIC (idVendor 0x1d6b / idProduct 0x0104), one Redfish-
+// over-IP protocol record: host 169.254.0.18/16, BMC 169.254.0.17:443.
+static std::vector<uint8_t> buildType42HostInterface(uint16_t handle)
+{
+    auto put16 = [](std::vector<uint8_t>& v, uint16_t x) {
+        v.push_back(static_cast<uint8_t>(x & 0xFF));
+        v.push_back(static_cast<uint8_t>((x >> 8) & 0xFF));
+    };
+    auto put32 = [](std::vector<uint8_t>& v, uint32_t x) {
+        v.push_back(static_cast<uint8_t>(x & 0xFF));
+        v.push_back(static_cast<uint8_t>((x >> 8) & 0xFF));
+        v.push_back(static_cast<uint8_t>((x >> 16) & 0xFF));
+        v.push_back(static_cast<uint8_t>((x >> 24) & 0xFF));
+    };
+    // DSP0270 stores each IP in a fixed 16-byte field; IPv4 uses the first 4.
+    auto putIp4 = [](std::vector<uint8_t>& v, uint8_t a, uint8_t b, uint8_t c,
+                     uint8_t d) {
+        v.push_back(a);
+        v.push_back(b);
+        v.push_back(c);
+        v.push_back(d);
+        v.insert(v.end(), 12, 0);
+    };
+
+    std::vector<uint8_t> dev;
+    dev.push_back(0x02); // Device Type: USB Network Interface
+    put16(dev, 0x1d6b);  // idVendor: Linux Foundation (the gadget)
+    put16(dev, 0x0104);  // idProduct: Multifunction/RNDIS gadget
+
+    std::vector<uint8_t> rf;
+    rf.insert(rf.end(), 16, 0);  // Redfish Service UUID (unset)
+    rf.push_back(0x03);          // Host IP Assignment Type: AutoConfigure
+    rf.push_back(0x01);          // Host IP Address Format: IPv4
+    putIp4(rf, 169, 254, 0, 18); // Host (BIOS-side) IP
+    putIp4(rf, 255, 255, 0, 0);  // Host IP subnet mask
+    rf.push_back(0x01);          // Redfish Service IP Discovery Type: Static
+    rf.push_back(0x01);          // Redfish Service IP Address Format: IPv4
+    putIp4(rf, 169, 254, 0, 17); // Redfish service (BMC) IP
+    putIp4(rf, 255, 255, 0, 0);  // Redfish service subnet mask
+    put16(rf, 443);              // Redfish Service IP Port
+    put32(rf, 0xFFFFFFFF);       // Redfish Service VLAN ID: none
+    const std::string svcHost = "169.254.0.17";
+    rf.push_back(static_cast<uint8_t>(svcHost.size()));
+    rf.insert(rf.end(), svcHost.begin(), svcHost.end());
+
+    std::vector<uint8_t> proto;
+    proto.push_back(0x04); // Protocol Type: Redfish over IP
+    proto.push_back(static_cast<uint8_t>(rf.size()));
+    proto.insert(proto.end(), rf.begin(), rf.end());
+
+    std::vector<uint8_t> s;
+    s.push_back(42);                               // Type
+    s.push_back(0);                                // Length (filled below)
+    put16(s, handle);                              // Handle
+    s.push_back(0x40);                             // Network Host Interface
+    s.push_back(static_cast<uint8_t>(dev.size())); // interface data length
+    s.insert(s.end(), dev.begin(), dev.end());
+    s.push_back(1);                                // Number of Protocol Records
+    s.insert(s.end(), proto.begin(), proto.end());
+    s[1] = static_cast<uint8_t>(s.size());         // formatted-area length
+    s.push_back(0);                                // no strings -> double-NULL
+    s.push_back(0);
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // Table assembly
@@ -681,6 +754,16 @@ std::vector<uint8_t> buildSmbiosTable()
         s.u64(0);               // cache size
         s.u64(0);               // logical size
         s.flush(out);
+    }
+
+    // ---- Type 42: Management Controller Host Interface ----
+    // Advertise the usb0 RNDIS Redfish Host Interface so a host OS can
+    // auto-discover the BMC at 169.254.0.17:443. Type 42 carries no text
+    // strings, so its complete structure (formatted area + double-NULL) is
+    // appended directly rather than via StructWriter.
+    {
+        std::vector<uint8_t> t42 = buildType42HostInterface(kHandleHostIface);
+        out.insert(out.end(), t42.begin(), t42.end());
     }
 
     // ---- Type 127: End-of-Table ----

@@ -1625,7 +1625,7 @@ static void registerOEMFunctions()
                           ipmiAmiVirtualDevGetStatus);
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
-                          kAmiSetHostAutoLock, ipmi::Privilege::Operator,
+                          kAmiSetHostAutoLock, ipmi::Privilege::Admin,
                           ipmiAmiSetHostAutoLock);
     ipmi::registerHandler(ipmi::prioOemBase,
                           static_cast<ipmi::NetFn>(ipmi::netFnOemSix),
