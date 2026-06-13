@@ -4,8 +4,8 @@ set -e
 
 GADGET_DIR="/sys/kernel/config/usb_gadget/obmc_redfish"
 
-BMC_MAC="9c:6b:00:4e:1c:2a"
-HOST_MAC="9c:6b:00:70:57:a4"
+BMC_MAC="02:00:16:92:54:17"
+HOST_MAC="02:00:16:92:54:18"
 
 # 1. Create the Gadget
 mkdir -p "$GADGET_DIR"

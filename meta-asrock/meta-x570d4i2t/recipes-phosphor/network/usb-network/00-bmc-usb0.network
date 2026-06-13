@@ -1,26 +1,14 @@
 [Match]
 Name=usb0
 
+[Link]
+MACAddress=02:00:16:92:54:17
+
 [Network]
-# Manage usb0 (the RNDIS host-interface gadget) statically. The old "Unmanaged"
-# workaround is obsolete on the current kernel/RNDIS: ConfigureWithoutCarrier is
-# honored, so networkd applies + keeps the address even before the host attaches.
-# DHCP MUST be off: IPMI Get LAN Config (transporthandler getIfAddr4) only returns
-# an address whose Origin matches the channel's DHCP state — with DHCP on it looks
-# for a DHCP-origin address and ignores our Static one, returning 0.0.0.0.
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=true
 DHCP=no
-LinkLocalAddressing=no
 IPv6AcceptRA=no
-
-[Address]
-# 169.254.0.17/16 is the host-interface IP the AMI BIOS expects. It lives in the
-# link-local range, so without Scope=global the kernel marks it "scope link" and
-# phosphor-network classifies it AddressOrigin.LinkLocal — which IPMI Get LAN
-# Config filters out (returns 0.0.0.0). Forcing global scope makes it report as
-# Static so the BIOS's Get LAN Config (NetFn 0x0C cmd 0x02) on channel 8 returns
-# 169.254.0.17. See channel_config.json: usb0 is IPMI channel 8.
 Address=169.254.0.17/16
 Scope=global
 
