@@ -7,8 +7,6 @@ MACAddress=02:00:16:92:54:17
 [Network]
 ConfigureWithoutCarrier=yes
 IgnoreCarrierLoss=true
-DHCP=no
-IPv6AcceptRA=no
 Address=169.254.0.17/16
 Scope=global
 
