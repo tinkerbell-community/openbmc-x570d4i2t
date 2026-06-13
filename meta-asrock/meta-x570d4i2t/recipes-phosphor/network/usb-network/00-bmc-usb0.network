@@ -1,0 +1,10 @@
+[Match]
+Name=usb0
+
+[Link]
+# systemd-networkd cannot apply a static address to this aspeed vhub gadget while
+# it has no carrier (ConfigureWithoutCarrier is not honored on this UDC) and it
+# actively FLUSHES any address added out-of-band. So leave usb0 unmanaged and let
+# usb_network.sh force the address (169.254.0.17/16) directly so the Redfish Host
+# Interface endpoint is always present, host-attached or not.
+Unmanaged=yes

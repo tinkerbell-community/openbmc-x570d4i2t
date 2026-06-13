@@ -1,7 +1,7 @@
 [Match]
 Name=usb0
 [Address]
-Address=192.168.0.10/16
+Address=192.168.0.10/24
 [Network]
 LinkLocalAddressing=no
 IPv6AcceptRA=no
