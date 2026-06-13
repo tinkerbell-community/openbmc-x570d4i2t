@@ -40,6 +40,8 @@ SRC_URI = " \
     file://src/sensorcommands.cpp \
     file://src/storagecommands.cpp \
     file://src/kcsmonitor.cpp \
+    file://src/redfish_to_ipmi_hooks.cpp \
+    file://asrock-redfish-to-ipmi.service \
     "
 
 S = "${UNPACKDIR}"
@@ -55,7 +57,16 @@ DEPENDS = " \
     libtinyxml2 \
     "
 
-inherit meson pkgconfig obmc-phosphor-ipmiprovider-symlink
+inherit meson pkgconfig obmc-phosphor-ipmiprovider-symlink systemd
+
+# Redfish→IPMI translator daemon (meson builds the binary; ship its unit).
+SYSTEMD_SERVICE:${PN} += "asrock-redfish-to-ipmi.service"
+
+do_install:append() {
+    install -d ${D}${systemd_system_unitdir}
+    install -m 0644 ${UNPACKDIR}/asrock-redfish-to-ipmi.service \
+        ${D}${systemd_system_unitdir}
+}
 
 # Library name must match the library() target in meson.build
 LIBRARY_NAMES = "libzasrockoemcmds.so"

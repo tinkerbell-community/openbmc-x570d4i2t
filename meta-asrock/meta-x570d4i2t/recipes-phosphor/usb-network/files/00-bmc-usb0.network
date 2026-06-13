@@ -1,0 +1,18 @@
+[Match]
+Name=usb0
+
+[Network]
+# Static link-local only; no SLAAC/DHCP on the in-band gadget.
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+# The aspeed vhub gadget reports no carrier until the host enumerates it
+# (carrier comes up on host power-on); assign the BMC address regardless so the
+# Redfish Host Interface endpoint is reachable as soon as the host attaches.
+ConfigureWithoutCarrier=yes
+
+[Address]
+Address=169.254.0.17/16
+
+[Link]
+# Keep usb0 administratively up even while the host is off.
+ActivationPolicy=always-up

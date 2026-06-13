@@ -73,3 +73,24 @@ library(
     install: true,
     install_dir: get_option('libdir') / 'ipmid-providers',
 )
+
+# -----------------------------------------------------------------------
+# Redfish → IPMI translator daemon for the usb0 Redfish Host Interface.
+# Standalone executable (has its own main); accepts Redfish HTTP on usb0 and
+# translates each request into an IPMI command via the Ipmi.Server D-Bus entry.
+# -----------------------------------------------------------------------
+
+executable(
+    'asrock-redfish-to-ipmi',
+    'src/redfish_to_ipmi_hooks.cpp',
+    include_directories: include_directories('.', 'include'),
+    implicit_include_directories: false,
+    dependencies: [
+        sdbusplus_dep,
+        phosphor_logging_dep,
+        nlohmann_json_dep,
+        dependency('threads'),
+    ],
+    install: true,
+    install_dir: get_option('bindir'),
+)

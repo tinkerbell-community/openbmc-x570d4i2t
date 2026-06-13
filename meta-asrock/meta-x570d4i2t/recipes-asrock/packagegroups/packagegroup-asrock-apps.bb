@@ -57,4 +57,6 @@ RDEPENDS:${PN}-system = " \
         biosconfig-manager \
         asrock-ipmi-oem \
         dbus-sensors \
+        usb-network \
+        phosphor-misc-usb-ctrl \
         "
