@@ -8,10 +8,10 @@
 	compatible = "asrock,x570d4i2t-bmc", "aspeed,ast2500";
 
 	aliases {
-		i2c40 = &i2c4mux0ch0;
-		i2c41 = &i2c4mux0ch1;
-		i2c42 = &i2c4mux0ch2;
-		i2c43 = &i2c4mux0ch3;
+		i2c40 = &i2c0mux0ch0;
+		i2c41 = &i2c0mux0ch1;
+		i2c42 = &i2c0mux0ch2;
+		i2c43 = &i2c0mux0ch3;
 	};
 
 	chosen {
@@ -83,7 +83,7 @@
 	/*  C */ "", "", "", "", "", "", "control-locatorbutton-n", "",
 	/*  D */ "button-power-n", "control-power-n", "button-reset-n",
 		 "control-reset-n", "", "", "", "",
-	/*  E */ "", "", "", "", "", "", "", "",
+	/*  E */ "", "", "", "", "output-redfish-hi-ready", "", "", "",
 	/*  F */ "", "", "", "", "", "", "", "",
 	/*  G */ "output-hwm-vbat-enable", "input-id0-n", "input-id1-n",
 		 "input-id2-n", "input-aux-smb-alert-n", "",
@@ -115,6 +115,22 @@
 		 "input-cpu1-prochot-n", "", "", "", "", "",
 	/* AB */ "", "input-power-good", "", "", "", "", "", "",
 	/* AC */ "", "", "", "", "", "", "", "";
+
+	/*
+	 * Drive GPIOE4 high as a "BMC ready" flag for the host BIOS Redfish Host
+	 * Interface. RedfishHi (DXE) probes the AST2500 Super-I/O at host I/O
+	 * 0x4E/0x4F, selects logical device 0x0D (the iLPC2AHB bridge) and reads
+	 * AHB 0x1E780020 (GPIO E/F/G/H data) bit4 = GPIOE4; if it is not 1 it
+	 * aborts before bringing up Redfish-over-USB on usb0. The Super-I/O decode
+	 * + iLPC2AHB bridge are kept enabled by the u-boot change
+	 * (CONFIG_ASPEED_ENABLE_SUPERIO + the isolate_bmc HICRB patch).
+	 */
+	redfish-hi-ready-hog {
+		gpio-hog;
+		gpios = <ASPEED_GPIO(E, 4) GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "output-redfish-hi-ready";
+	};
 };
 
 &fmc {
@@ -139,9 +155,6 @@
 		spi-max-frequency = <50000000>;
 	};
 };
-
-/* NOTE: do NOT enable &xdma — it clears the SCU VGA_EN bit and steals the
- * host PCIe VGA function (1a03:2000 -> 1a03:2402 class 0xff), killing KVM video. */
 
 &uart5 {
 	status = "okay";
@@ -173,41 +186,11 @@
 };
 
 &i2c0 {
-	/* SMBus on auxiliary panel header (AUX_PANEL1) */
-	status = "okay";
-};
-
-&i2c1 {
 	/*
-	 * Hardware monitoring SMBus.
-	 * Hosts both the W83773G temperature monitor and the AMD CPU's
-	 * SB-RMI/SB-TSI (APML) interfaces — confirmed against the stock AMI
-	 * firmware's /etc/defconfig/BMC1/1U2-X570/2T/IPMI.conf which sets
-	 * APML_BUS_NUMBER=1 and APML2_BUS_NUMBER=1.
+	 * PCIe slot and M.2 SMBus. PCA9545 4-channel mux confirmed at 0x70
+	 * by live i2cdetect (NACK on i2c4, ACK on i2c0).
+	 * Channels: PCIe x16 slot | M.2 slot 1 (NVMe MI) | M.2 slot 2 | Reserved
 	 */
-	status = "okay";
-
-	w83773g@4c {
-		compatible = "nuvoton,w83773g";
-		reg = <0x4c>;
-	};
-
-	sbrmi@3c {
-		compatible = "amd,sbrmi";
-		reg = <0x3c>;
-	};
-};
-
-&i2c2 {
-	/* PSU SMBus (PSU_SMB1) */
-	status = "okay";
-};
-
-&i2c3 {
-	status = "okay";
-};
-
-&i2c4 {
 	status = "okay";
 
 	i2c-mux@70 {
@@ -216,14 +199,14 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		i2c4mux0ch0: i2c@0 {
+		i2c0mux0ch0: i2c@0 {
 			/* SMBus on PCIe slot (X570D4I-2T: single PCIe x16) */
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <0>;
 		};
 
-		i2c4mux0ch1: i2c@1 {
+		i2c0mux0ch1: i2c@1 {
 			/*
 			 * SMBus on M.2 slot 1 — carries the NVMe MI sideband
 			 * used by the stock BMC to report SDR sensor #56
@@ -237,14 +220,14 @@
 			reg = <1>;
 		};
 
-		i2c4mux0ch2: i2c@2 {
+		i2c0mux0ch2: i2c@2 {
 			/* SMBus on M.2 slot 2 */
 			#address-cells = <1>;
 			#size-cells = <0>;
 			reg = <2>;
 		};
 
-		i2c4mux0ch3: i2c@3 {
+		i2c0mux0ch3: i2c@3 {
 			/* Reserved */
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -253,10 +236,102 @@
 	};
 };
 
+&i2c1 {
+	/*
+	 * Hardware-monitor SMBus (HWM_SMB).
+	 *  - 0x4C: Nuvoton W83773G temperature monitor
+	 *  - 0x2D: Nuvoton NCT6779/NCT6796 family Super-I/O hardware monitor,
+	 *    accessed via its "back door" i2c interface. The host BIOS
+	 *    continues to drive the same chip via LPC (front door) and owns
+	 *    fan PWM/tach control through its built-in Smart Fan curve. The
+	 *    BMC binds nct6775-i2c read-only and surfaces SYSTIN, CPUTIN,
+	 *    AUXTIN, the X570 chipset temp (PCH_CHIP_TEMP, == "X570 Temp" on
+	 *    the stock MegaRAC), voltages, and fan RPMs into hwmon.
+	 *
+	 * NOTE: AMI's IPMI.conf labels APML_BUS_NUMBER=1, but on the
+	 * X570D4I-2T physical wiring the AMD SB-RMI is actually accessible
+	 * from the BMC on i2c2 (confirmed by i2cdetect + reading SB-RMI
+	 * Version reg 0x20 = 0x17, AMD Family 19h). MegaRAC's bus numbers
+	 * follow its own legacy convention, not the Linux aspeed-i2c probe
+	 * order. See sbrmi@3c under &i2c2 below.
+	 */
+	status = "okay";
+
+	w83773g@4c {
+		compatible = "nuvoton,w83773g";
+		reg = <0x4c>;
+	};
+
+	nct6779@2d {
+		compatible = "nuvoton,nct6779";
+		reg = <0x2d>;
+	};
+};
+
+&i2c2 {
+	/*
+	 * AMD SB-RMI (APML) SMBus. Confirmed by reading SB-RMI Version reg
+	 * 0x20 = 0x17 (Family 19h). The bus is also reported by the playbook
+	 * as "PSU_SMB1" via AMI's IPMI.conf, but the actual device on the
+	 * production board at i2c2 0x3C is the CPU's APML slave, not a PSU.
+	 */
+	status = "okay";
+
+	sbrmi@3c {
+		compatible = "amd,sbrmi";
+		reg = <0x3c>;
+	};
+};
+
+&i2c3 {
+	status = "okay";
+};
+
+&i2c4 {
+	/*
+	 * Auxiliary SMBus. Confirmed live device: Nuvoton NCT75 LM75-compatible
+	 * temperature sensor at 0x4f (vendor reg 0xfe=0xde, temp reads ~65°C).
+	 * The PCA9545 mux originally assumed here (0x70) is actually on i2c0.
+	 */
+	status = "okay";
+
+	nct75@4f {
+		/*
+		 * The NCT75 is LM75-register-compatible, but the kernel lm75
+		 * driver's match tables (6.18) have no "nuvoton,nct75" entry —
+		 * with only that compatible the driver never binds, no hwmon
+		 * appears, and the entity-manager "Aux Temp" (NCT75 @ bus4 0x4f)
+		 * sensor silently goes missing. Add the generic "national,lm75"
+		 * fallback (in the lm75 of_match table) so the driver binds.
+		 */
+		compatible = "nuvoton,nct75", "national,lm75";
+		reg = <0x4f>;
+	};
+};
+
 &i2c5 {
 	/* SMBus on BMC connector (BMC_SMB_1) */
 	status = "okay";
 };
+
+&i2c6 {
+	/*
+	 * Host-shared SMBus per AMI's IPMI.conf (SMBUS_BUS_NUM=6). Likely
+	 * carries the host-side fan/temperature SuperIO or CPLD that the
+	 * stock BMC's pwmtach.ko configured before commanding fans through
+	 * the AST2500 PWM/Tach controller. Enabled for runtime probing
+	 * (i2cdetect) — children are added once the actual device is
+	 * identified.
+	 */
+	status = "okay";
+};
+
+/*
+ * i2c9: probing shows I2C mux chips at 0x72-0x77 (busy — already claimed).
+ * No declared devices; leave disabled until topology is mapped.
+ * i2c10/i2c11: return "Error reading bus" — no physical connections.
+ * i2c12/i2c13: no known devices, leave disabled.
+ */
 
 &i2c7 {
 	/* FRU and SPD EEPROM SMBus — also holds MAC addresses in NVMEM */
@@ -281,6 +356,24 @@
 			};
 		};
 	};
+
+	/* DDR4 SPD EEPROMs (EE1004) - kernel drives SPA0/SPA1 page-select */
+	dimm0_spd: eeprom@50 {
+		compatible = "jedec,ee1004";
+		reg = <0x50>;
+	};
+	dimm1_spd: eeprom@51 {
+		compatible = "jedec,ee1004";
+		reg = <0x51>;
+	};
+	dimm2_spd: eeprom@52 {
+		compatible = "jedec,ee1004";
+		reg = <0x52>;
+	};
+	dimm3_spd: eeprom@53 {
+		compatible = "jedec,ee1004";
+		reg = <0x53>;
+	};
 };
 
 &i2c8 {
@@ -290,11 +383,11 @@
 
 &gfx {
 	status = "okay";
+	memory-region = <&gfx_memory>;
 };
 
 &vhub {
-	/* USB 2.0 virtual hub — UDC for the configfs virtual-media gadget.
-	 * No USB network / Redfish-Host-Interface gadget is configured. */
+	/* USB 2.0 virtual hub UDC (virtual media); no USB-NCM/RHI gadget */
 	status = "okay";
 };
 
@@ -316,9 +409,12 @@
 };
 
 &lpc_snoop {
-	/* POST code snooping on LPC port 0x80 — 2-byte AGESA codes captured */
+	/*
+	 * AMD AGESA generates 2-byte POST codes: byte-low on port 0x80,
+	 * byte-high on port 0x81. Snoop both for full AGESA code capture.
+	 */
 	status = "okay";
-	snoop-ports = <0x80>;
+	snoop-ports = <0x80 0x81>;
 };
 
 &p2a {
@@ -333,14 +429,17 @@
 
 &pwm_tacho {
 	/*
-	 * X570D4I-2T has 3 fan headers (FAN1, FAN2, FAN3), all 4-pin.
-	 * Verified via /api/asrr/settings/getsupportfan (only fan1..3 = 1).
+	 * X570D4I-2T has 3 fan headers (FAN1, FAN2, FAN3), all 4-pin,
+	 * verified via the stock /api/asrr/settings/getsupportfan endpoint
+	 * (only fan1..3 = 1). Channel mapping matches the sibling X570D4U
+	 * (same PCB generation): PWM0→FAN1/TACH0, PWM1→FAN2/TACH1,
+	 * PWM2→FAN3/TACH2. All headers are single-tach 4-pin.
 	 */
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_pwm0_default
-				&pinctrl_pwm1_default
-				&pinctrl_pwm2_default>;
+		     &pinctrl_pwm1_default
+		     &pinctrl_pwm2_default>;
 
 	fan@0 {
 		/* FAN1 (4-pin) */

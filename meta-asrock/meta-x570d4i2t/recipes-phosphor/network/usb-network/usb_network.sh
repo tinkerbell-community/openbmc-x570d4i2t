@@ -16,13 +16,16 @@ echo 0x0104 > idProduct # Multifunction Composite Gadget
 echo 0x0200 > bcdUSB    # USB 2.0
 echo 0x0100 > bcdDevice # v1.0.0
 
-# Microsoft "RNDIS over USB" device-class triple (0xEF Miscellaneous / 0x04 RNDIS
-# / 0x01). The AMI BIOS Redfish Host Interface driver — and Windows — bind the
-# in-box RNDIS driver off this class + the MS OS descriptors set below. RNDIS is
-# the windows-compatible function; NCM/ECM are not bound by the BIOS.
-echo 0xEF > bDeviceClass
-echo 0x04 > bDeviceSubClass
-echo 0x01 > bDeviceProtocol
+# Device-class triple = 0x02/0x00/0x00 (Communications/CDC), matching the STOCK
+# AMI MegaRAC gadget (eth.ko CreateEthernetDescriptor emits exactly this: device
+# class 0x02, sub 0x00, proto 0x00, flat CDC-ACM, NO IAD). The X570D4I-2T BIOS's
+# EDK2 UsbRndis driver binds the RNDIS control interface (0x02/0x02/0xFF) + data
+# interface (0x0A) regardless, and Windows still loads RNDIS via the MS OS
+# descriptors below. We previously used the Microsoft single-interface 0xEF/0x04/0x01
+# class, which differs from the stock identity the BIOS was validated against.
+echo 0x02 > bDeviceClass
+echo 0x00 > bDeviceSubClass
+echo 0x00 > bDeviceProtocol
 
 # 3. Set standard string descriptors
 mkdir -p strings/0x409
@@ -61,14 +64,10 @@ ln -s configs/c.1 os_desc
 # "1e6a0000.usb-vhub:p1" is Port 1 of the AST2500 vhub.
 echo "1e6a0000.usb-vhub:p1" > UDC
 
-# 8. Assign the BMC-side IP directly with iproute2.
-# Binding the UDC creates the usb0 netdev asynchronously, so wait for it to
-# appear before configuring. `ip addr replace` is idempotent (safe under set -e
-# on a service restart, unlike `ip addr add` which fails if the addr exists).
-for _ in $(seq 1 50); do
-    [ -e /sys/class/net/usb0 ] && break
-    sleep 0.1
-done
-
-ip link set usb0 up
-ip addr replace 169.254.0.17/16 dev usb0
+# 8. Addressing is intentionally NOT done here.
+# systemd-networkd owns the usb0 address via 00-bmc-usb0.network, which assigns
+# 169.254.0.17/16 with **scope global** so phosphor-network classifies it as
+# AddressOrigin.Static (required for IPMI "Get LAN Config ch8" to return the IP
+# to the host BIOS Redfish Host Interface). busybox `ip addr ... scope global`
+# silently applies scope LINK instead, which phosphor tags LinkLocal and the
+# transport handler then drops -> Get LAN returns 0.0.0.0. So leave it to networkd.
