@@ -37,9 +37,7 @@ phosphor_logging_dep     = dependency('phosphor-logging')
 sdbusplus_dep            = dependency('sdbusplus')
 ipmid_dep                = dependency('libipmid')
 # Redfish Host Interface credential bootstrap (NetFn 0x2C / Group 0x52):
-# OpenSSL for the manager TLS cert fingerprint, PAM to set the bootstrap
-# account password in the shadow DB.
-openssl_dep              = dependency('openssl')
+# PAM to set the bootstrap account password in the shadow DB.
 pam_dep                  = meson.get_compiler('cpp').find_library('pam')
 
 asrock_oem_deps = [
@@ -48,7 +46,6 @@ asrock_oem_deps = [
     phosphor_dbus_ifaces_dep,
     phosphor_logging_dep,
     sdbusplus_dep,
-    openssl_dep,
     pam_dep,
 ]
 

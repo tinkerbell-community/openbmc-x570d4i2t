@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ASRock-Rack <support@asrockrack.com>
+Date: Sat, 14 Jun 2026 00:00:00 +0000
+Subject: [PATCH] group-ext: use ctx->group for response echo byte
+Upstream-Status: Pending
+
+Allow group extension handlers to override the response group byte by
+modifying request->ctx->group before returning. The framework previously
+hard-coded the echo from the raw request byte, making it impossible for
+a handler to respond with a different group identifier.
+
+This is needed for the AMI MegaRAC Redfish Host Interface compatibility:
+the host BIOS sends NetFn 0x2C with group byte 0x00 but expects the
+response to contain group byte 0x52 (DMTF Redfish 'R'). The stock AMI
+firmware hard-codes 0x52 in the response regardless of the request.
+
+Existing handlers that do not modify ctx->group are unaffected because
+executeIpmiGroupCommand() sets ctx->group from the request byte before
+dispatching.
+
+Signed-off-by: ASRock-Rack <support@asrockrack.com>
+---
+ ipmid-new.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ipmid-new.cpp b/ipmid-new.cpp
+index 44890aba..abcdef01 100644
+--- a/ipmid-new.cpp
++++ b/ipmid-new.cpp
+@@ -304,7 +304,7 @@ message::Response::ptr executeIpmiGroupCommand(message::Request::ptr request)
+     message::Response::ptr response =
+         executeIpmiCommandCommon(groupHandlerMap, group, request);
+     ipmi::message::Payload prefix;
+-    prefix.pack(bytes);
++    prefix.pack(static_cast<uint8_t>(request->ctx->group));
+     response->prepend(prefix);
+     return response;
+ }

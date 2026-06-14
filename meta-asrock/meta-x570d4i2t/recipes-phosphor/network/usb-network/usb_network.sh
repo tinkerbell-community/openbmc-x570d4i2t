@@ -11,8 +11,14 @@ HOST_MAC="02:00:16:92:54:18"
 mkdir -p "$GADGET_DIR"
 cd "$GADGET_DIR"
 
-echo 0x1d6b > idVendor  # Linux Foundation
-echo 0x0104 > idProduct # Multifunction Composite Gadget
+# idVendor 0x046B (AMI) / idProduct 0xFFB0 are MANDATORY: the host BIOS's
+# RedfishHi DXE driver gates host-interface bring-up on EXACTLY this USB VID/PID
+# (UsbGetDeviceDescriptor: cmp idVendor,0x046B; cmp idProduct,0xFFB0). With any
+# other VID/PID it refuses to bind the NIC, never assigns 169.254.0.18, and the
+# whole RHI credential/Redfish flow stalls. (Reverse-engineered from RedfishHi.efi
+# @0x6b0f/0x6b1b — these are the only USB VID/PID literals in that binary.)
+echo 0x046b > idVendor  # AMI (required by host RedfishHi driver)
+echo 0xffb0 > idProduct # AMI Redfish Host Interface RNDIS device
 echo 0x0200 > bcdUSB    # USB 2.0
 echo 0x0100 > bcdDevice # v1.0.0
 

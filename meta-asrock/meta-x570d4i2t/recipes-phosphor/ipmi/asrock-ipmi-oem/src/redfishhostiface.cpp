@@ -34,7 +34,6 @@
 #include <phosphor-logging/log.hpp>
 #include <sdbusplus/bus.hpp>
 
-#include <openssl/evp.h>
 #include <security/pam_appl.h>
 
 #include <array>
@@ -57,16 +56,16 @@ using phosphor::logging::log;
 
 // DMTF Redfish Host Interface group extension.
 //
-// EMPIRICALLY CONFIRMED on this board (KCS capture 2026-06-14): the BIOS sends
-//   NetFn 0x2C, Cmd 0x01, data=[0x00]   (group/defining-body = 0x00, no
-//   trailing certificate-number byte). So we must REGISTER under group 0x00.
-// The stock MegaRAC handler registers under 0x00 too but hard-codes 0x52 as
-// the group byte in its *response* (non-standard AMI quirk). OpenBMC's group
-// framework echoes the *request* group (0x00) into the response, so our reply
-// is [CC][0x00][...] — which matches what the BIOS actually sent. If a future
-// capture shows the BIOS rejecting the 0x00-echo and demanding 0x52, switch to
-// a raw NetFn 0x2C handler that emits 0x52 manually.
+// The BIOS sends NetFn 0x2C, Cmd 0x01, data=[0x00] (group byte 0x00), but
+// the stock MegaRAC firmware hard-codes 0x52 ('R' = DMTF Redfish) as the
+// response group byte. The BIOS rejects responses with group 0x00.
+//
+// We register under group 0x00 (so the dispatcher matches the BIOS request)
+// but override ctx->group to 0x52 inside the handler. The patched ipmid
+// (0001-group-ext-use-ctx-group-for-response-echo.patch) uses ctx->group
+// for the response echo byte instead of the raw request byte.
 static constexpr ipmi::Group groupRedfish = 0x00;
+static constexpr ipmi::Group groupRedfishResponse = 0x52;
 
 static constexpr ipmi::Cmd cmdGetMgrCertFingerprint = 0x01;
 static constexpr ipmi::Cmd cmdGetBootstrapCreds = 0x02;
@@ -77,6 +76,9 @@ static constexpr const char* kBmcwebCertPath =
 
 // DSP0270 fingerprint hash-type identifiers.
 static constexpr uint8_t fingerprintTypeSha256 = 0x01;
+
+// Stock MegaRAC fingerprint length: 50 bytes of base64 cert body.
+static constexpr size_t kFingerprintLen = 50;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -160,34 +162,55 @@ static bool pamSetPassword(const std::string& user, const std::string& pass)
     return ret == PAM_SUCCESS;
 }
 
-// Compute the SHA-256 fingerprint of the BMC's TLS server certificate (DER of
-// the leaf cert). Returns the 32 raw hash bytes. The stock firmware reads the
-// PEM between BEGIN/END markers and digests it via GenerateDigestMultiPartFromMem.
-static bool certFingerprintSha256(std::array<uint8_t, 32>& out)
+// Extract the first 50 bytes of the base64 certificate body from the BMC's TLS
+// server certificate PEM file. This matches the stock MegaRAC firmware's
+// GetManagerCertificateFingerprint, which reads the server PEM, takes the
+// certificate's base64 body, and copies the first 50 bytes verbatim.
+//
+// NOTE: the stock firmware reads a cert-only /conf/certs/server.pem, but
+// bmcweb's /etc/ssl/certs/https/server.pem is a COMBINED PEM that holds the
+// private key block BEFORE the certificate block. We therefore capture only
+// the base64 between the "BEGIN CERTIFICATE"/"END CERTIFICATE" markers — never
+// the private-key body — so the fingerprint reflects the cert the BIOS will
+// see over TLS at https://169.254.0.17 (and never leaks key material).
+static bool certFingerprintBase64Prefix(std::vector<uint8_t>& out)
 {
-    std::ifstream cert(kBmcwebCertPath, std::ios::binary);
+    std::ifstream cert(kBmcwebCertPath);
     if (!cert.good())
     {
         return false;
     }
-    std::string pem((std::istreambuf_iterator<char>(cert)),
-                    std::istreambuf_iterator<char>());
-    if (pem.empty())
+
+    std::string base64Body;
+    std::string line;
+    bool inCert = false;
+    while (std::getline(cert, line))
     {
+        if (line.find("BEGIN CERTIFICATE") != std::string::npos)
+        {
+            inCert = true;
+            continue;
+        }
+        if (line.find("END CERTIFICATE") != std::string::npos)
+        {
+            break;
+        }
+        if (inCert)
+        {
+            base64Body += line;
+        }
+    }
+
+    if (base64Body.size() < kFingerprintLen)
+    {
+        log<level::ERR>("RHI: cert base64 body too short",
+                        entry("LEN=%zu", base64Body.size()));
         return false;
     }
 
-    unsigned int len = 0;
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (ctx == nullptr)
-    {
-        return false;
-    }
-    bool ok = EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1 &&
-              EVP_DigestUpdate(ctx, pem.data(), pem.size()) == 1 &&
-              EVP_DigestFinal_ex(ctx, out.data(), &len) == 1 && len == out.size();
-    EVP_MD_CTX_free(ctx);
-    return ok;
+    out.assign(base64Body.begin(),
+               base64Body.begin() + static_cast<std::ptrdiff_t>(kFingerprintLen));
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,15 +218,20 @@ static bool certFingerprintSha256(std::array<uint8_t, 32>& out)
 //
 // Request (after group byte): [certificateNumber]  (must be 1)
 // Response (after group byte): [fingerprintHashType][fingerprint...]
-// Stock returns hashType=0x01 then a 50-byte fingerprint (total 53 incl CC+grp).
-// We return the DSP0270-standard SHA-256 (32 raw bytes); the host uses this to
-// pin the BMC's TLS cert when it connects to https://169.254.0.17.
+// Stock returns hashType=0x01 then a 50-byte fingerprint (first 50 bytes of
+// the PEM certificate's base64 body, total 53 incl CC+grp). We match this
+// format exactly. The host uses this to verify the BMC's TLS cert.
 // ---------------------------------------------------------------------------
 ipmi::RspType<uint8_t, std::vector<uint8_t>>
     getManagerCertificateFingerprint(
-        ipmi::Context::ptr& /*ctx*/,
+        ipmi::Context::ptr& ctx,
         std::optional<uint8_t> certificateNumber)
 {
+    // Override the response group byte from 0x00 (what the BIOS sends) to 0x52
+    // (what the stock MegaRAC firmware returns). The patched ipmid uses
+    // ctx->group for the response echo byte.
+    ctx->group = groupRedfishResponse;
+
     // The BIOS on this board sends no certificate-number byte (request is just
     // the group byte). Treat absent as cert #1. If a number IS supplied it must
     // be 1, else CC 0xCB (matches stock).
@@ -217,17 +245,16 @@ ipmi::RspType<uint8_t, std::vector<uint8_t>>
         return ipmi::response(0xCB);
     }
 
-    std::array<uint8_t, 32> fp{};
-    if (!certFingerprintSha256(fp))
+    std::vector<uint8_t> fingerprint;
+    if (!certFingerprintBase64Prefix(fingerprint))
     {
         log<level::ERR>(
-            "RHI: failed to read/hash bmcweb TLS cert",
+            "RHI: failed to read bmcweb TLS cert base64 body",
             entry("PATH=%s", kBmcwebCertPath));
         // 0xCE = command response could not be provided.
         return ipmi::response(0xCE);
     }
 
-    std::vector<uint8_t> fingerprint(fp.begin(), fp.end());
     return ipmi::responseSuccess(fingerprintTypeSha256, fingerprint);
 }
 
@@ -245,9 +272,11 @@ ipmi::RspType<uint8_t, std::vector<uint8_t>>
 // ---------------------------------------------------------------------------
 ipmi::RspType<std::array<uint8_t, 16>, std::array<uint8_t, 16>>
     getBootstrapAccountCredentials(
-        ipmi::Context::ptr& /*ctx*/,
+        ipmi::Context::ptr& ctx,
         std::optional<uint8_t> disableBootstrapControlOpt)
 {
+    // Override response group byte to 0x52 (same as cmd 0x01).
+    ctx->group = groupRedfishResponse;
     uint8_t disableBootstrapControl = disableBootstrapControlOpt.value_or(0);
     log<level::INFO>(
         "RHI 0x2C/00/02 GetBootstrapAccountCredentials",

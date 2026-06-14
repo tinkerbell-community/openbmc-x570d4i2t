@@ -56,7 +56,6 @@ DEPENDS = " \
     systemd \
     libgpiod \
     libtinyxml2 \
-    openssl \
     libpam \
     "
 
