@@ -40,6 +40,7 @@ SRC_URI = " \
     file://src/sensorcommands.cpp \
     file://src/storagecommands.cpp \
     file://src/kcsmonitor.cpp \
+    file://src/redfishhostiface.cpp \
     file://src/redfish_to_ipmi_hooks.cpp \
     file://asrock-redfish-to-ipmi.service \
     "
@@ -55,6 +56,8 @@ DEPENDS = " \
     systemd \
     libgpiod \
     libtinyxml2 \
+    openssl \
+    libpam \
     "
 
 inherit meson pkgconfig obmc-phosphor-ipmiprovider-symlink systemd
