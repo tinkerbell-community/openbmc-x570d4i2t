@@ -31,45 +31,34 @@ add_project_arguments(
 # Dependencies
 # -----------------------------------------------------------------------
 
-nlohmann_json_dep        = dependency('nlohmann_json',           include_type: 'system')
-phosphor_dbus_ifaces_dep = dependency('phosphor-dbus-interfaces')
 phosphor_logging_dep     = dependency('phosphor-logging')
 sdbusplus_dep            = dependency('sdbusplus')
 ipmid_dep                = dependency('libipmid')
-# Redfish Host Interface credential bootstrap (NetFn 0x2C / Group 0x52):
-# PAM to set the bootstrap account password in the shadow DB.
-pam_dep                  = meson.get_compiler('cpp').find_library('pam')
 
 asrock_oem_deps = [
     ipmid_dep,
-    nlohmann_json_dep,
-    phosphor_dbus_ifaces_dep,
     phosphor_logging_dep,
     sdbusplus_dep,
-    pam_dep,
 ]
 
 # -----------------------------------------------------------------------
 # Shared library – loaded by phosphor-ipmi-host at runtime
 # -----------------------------------------------------------------------
 
+# Reduced to the IPMI request logger only. All custom OEM command/SMBIOS-synth
+# handlers were removed: SMBIOS now flows host -> BMC via the standard
+# smbios-ipmi-blob (/smbios) receiver (see smbios-mdr_%.bbappend) fed by our
+# injected SmbiosBmcPushDxe; standard phosphor providers handle the rest.
+# kcsmonitor is a pass-through filter that logs every inbound IPMI request
+# (incl. unhandled ones) — kept as a blank-screen / POST sanity check.
 asrockoemcmds_src = [
-    'src/amiconverter.cpp',
-    'src/amicommands.cpp',
-    'src/smbiosbuilder.cpp',
-    'src/appcommands.cpp',
-    'src/chassiscommands.cpp',
-    'src/oemcommands.cpp',
-    'src/sensorcommands.cpp',
-    'src/storagecommands.cpp',
     'src/kcsmonitor.cpp',
-    'src/redfishhostiface.cpp',
 ]
 
 library(
     'zasrockoemcmds',
     sources: asrockoemcmds_src,
-    include_directories: include_directories('.', 'include'),
+    include_directories: include_directories('.'),
     implicit_include_directories: false,
     dependencies: asrock_oem_deps,
     version: meson.project_version(),
@@ -77,25 +66,4 @@ library(
     override_options: ['b_lundef=false'],
     install: true,
     install_dir: get_option('libdir') / 'ipmid-providers',
-)
-
-# -----------------------------------------------------------------------
-# Redfish → IPMI translator daemon for the usb0 Redfish Host Interface.
-# Standalone executable (has its own main); accepts Redfish HTTP on usb0 and
-# translates each request into an IPMI command via the Ipmi.Server D-Bus entry.
-# -----------------------------------------------------------------------
-
-executable(
-    'asrock-redfish-to-ipmi',
-    'src/redfish_to_ipmi_hooks.cpp',
-    include_directories: include_directories('.', 'include'),
-    implicit_include_directories: false,
-    dependencies: [
-        sdbusplus_dep,
-        phosphor_logging_dep,
-        nlohmann_json_dep,
-        dependency('threads'),
-    ],
-    install: true,
-    install_dir: get_option('bindir'),
 )

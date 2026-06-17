@@ -1,24 +1,15 @@
-SUMMARY = "ASRock OEM IPMI commands for the X570D4I-2T"
+SUMMARY = "ASRock X570D4I-2T IPMI request logger"
 DESCRIPTION = "\
-Implements the ASRock / AMI OEM IPMI command set for the \
-X570D4I-2T BMC running OpenBMC, using the same IPMI provider \
-plugin architecture as phosphor-host-ipmid.  \
+A minimal phosphor-ipmi-host provider for the X570D4I-2T that registers a \
+pass-through IPMI request *filter* (kcsmonitor): it logs every inbound IPMI \
+message — including unhandled NetFn/Cmd pairs the host BIOS sends over KCS — to \
+the journal, tagged with the channel, as a POST / blank-screen sanity check. \
 \
-Provides: \
-  - App NetFn overrides: GetDeviceId (real FW version from D-Bus), GetSystemGuid \
-  - Chassis NetFn overrides: GetChassisStatus (with SIO intrusion state + \
-    identify LED), ChassisIdentify (LED group), GetSystemRestartCause \
-  - Sensor NetFn override: PlatformEvent (routes to phosphor-logging / Redfish) \
-  - Storage NetFn overrides: GetSELInfo, AddSELEntry (Redfish bridge), GetSELTime \
-  - AMI/ASRock OEM commands (NetFn 0x30): GetBoardInfo, GetSensorInfo, \
-    GetFwVersion, MuxSwitching (GPIOJ1), PeciReadWrite stub, PsuInfo, \
-    ManageBmcConfig, GetSelPolicy, YAFU stubs (phosphor-ipmi-blobs path) \
-\
-SMBIOS is received over IPMI (AMI MDR: NetFn 0x3A 0xB5 SetSmbiosChunk + \
-NetFn 0x32 0x5D LegacyCtrl), handled here and synthesized from FRU/SPD into \
-smbios-mdrv2. BIOS configuration has no host-push path on this board (the USB \
-Redfish Host Interface approach was removed); the stock bmcweb /Bios routes \
-are served from xyz.openbmc_project.BIOSConfigManager. \
+All prior custom OEM command and SMBIOS-synthesis handlers (and the abandoned \
+Redfish-Host-Interface code) were removed.  The host now pushes its full SMBIOS \
+table to the BMC over KCS via the STANDARD smbios-ipmi-blob (\"/smbios\") receiver \
+(see smbios-mdr_%.bbappend), driven by the injected SmbiosBmcPushDxe \
+(recipes-bsp/host-bios-image); standard phosphor providers serve everything else. \
 "
 
 LICENSE = "Apache-2.0"
@@ -27,48 +18,18 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/Apache-2.0;md5=89aea4e17d99a7ca
 SRC_URI = " \
     file://meson.build \
     file://meson.options \
-    file://include/amiconverter.hpp \
-    file://include/amicommands.hpp \
-    file://include/oemcommands.hpp \
-    file://include/smbiosbuilder.hpp \
-    file://src/amiconverter.cpp \
-    file://src/amicommands.cpp \
-    file://src/smbiosbuilder.cpp \
-    file://src/appcommands.cpp \
-    file://src/chassiscommands.cpp \
-    file://src/oemcommands.cpp \
-    file://src/sensorcommands.cpp \
-    file://src/storagecommands.cpp \
     file://src/kcsmonitor.cpp \
-    file://src/redfishhostiface.cpp \
-    file://src/redfish_to_ipmi_hooks.cpp \
-    file://asrock-redfish-to-ipmi.service \
     "
 
 S = "${UNPACKDIR}"
 DEPENDS = " \
     boost \
-    nlohmann-json \
-    phosphor-dbus-interfaces \
     phosphor-ipmi-host \
     phosphor-logging \
     sdbusplus \
-    systemd \
-    libgpiod \
-    libtinyxml2 \
-    libpam \
     "
 
 inherit meson pkgconfig obmc-phosphor-ipmiprovider-symlink systemd
-
-# Redfish→IPMI translator daemon (meson builds the binary; ship its unit).
-SYSTEMD_SERVICE:${PN} += "asrock-redfish-to-ipmi.service"
-
-do_install:append() {
-    install -d ${D}${systemd_system_unitdir}
-    install -m 0644 ${UNPACKDIR}/asrock-redfish-to-ipmi.service \
-        ${D}${systemd_system_unitdir}
-}
 
 # Library name must match the library() target in meson.build
 LIBRARY_NAMES = "libzasrockoemcmds.so"
