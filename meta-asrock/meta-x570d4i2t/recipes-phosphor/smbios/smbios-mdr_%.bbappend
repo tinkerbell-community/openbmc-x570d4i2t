@@ -21,6 +21,15 @@ PACKAGECONFIG:append = " smbios-ipmi-blob"
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 SRC_URI:append = " file://memoryLocationTable.json"
 
+# Make the /smbios blob handler's path-stat report the SMBIOS table already
+# persisted at /var/lib/smbios/smbios2 when no blob session is open (upstream
+# returns failure in that case).  This lets our injected SmbiosBmcPushDxe do a
+# single BmcBlobStat (sub 0x08) first and skip the full table push over KCS when
+# the BMC already has the data -- faster host boot.  rm the file + reboot to
+# force a refresh.
+SRC_URI:append = " file://0001-smbios-blob-stat-persisted-file.patch"
+PATCHTOOL = "patch"
+
 do_install:append() {
     install -d ${D}${datadir}/smbios-mdr
     install -m 0644 ${UNPACKDIR}/memoryLocationTable.json \

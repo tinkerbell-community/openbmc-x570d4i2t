@@ -13,7 +13,11 @@
     Open 0x02 / Write 0x04 / Commit 0x05 / Close 0x06
     Commit payload: [session(2)][commit_data_len(1)][...]
     CRC16: CCITT poly 0x1021 init 0xFFFF, 2 extra rounds, over payload
-  Data pushed: [synthesized SMBIOS3 entry point "_SM3_"][structure table].
+  Data pushed: [SMBIOS structure table (Type 0..127)][synthesized "_SM3_" entry
+  point AT THE END].  smbios-mdr parses structures from byte 0 (so the table
+  must start there or Type 0/version is skipped) yet also requires an
+  "_SM_"/"_SM3_" anchor somewhere in the buffer (checkSMBIOSVersion); the
+  trailing entry point satisfies both.  A LEADING entry point breaks Type 0.
 
   POST-code markers on port 0x80 (BMC-snooped, BIOS-unused values) trace
   progress: 0x58 entry, 0x5B smbios-found, 0x5C no-smbios, 0xB8 push-ok,
@@ -62,8 +66,13 @@ STATIC EFI_GUID mEfiSmbiosProtocolGuid = {
 #define SUB_WRITE  0x04u
 #define SUB_COMMIT 0x05u
 #define SUB_CLOSE  0x06u
+#define SUB_STAT   0x08u
 #define OPEN_WRITE 0x0002u
 #define WRITE_MAX  54u
+
+/* phosphor-ipmi-blobs StateFlags::committed (1<<3) — set in the blob stat
+   response when the BMC already has the SMBIOS table persisted on disk. */
+#define BLOB_STATE_COMMITTED 0x0008u
 
 STATIC CONST CHAR8 mBlobId[] = "/smbios";
 STATIC CONST UINT8 mOen[3] = { 0xCF, 0xC2, 0x00 };
@@ -176,6 +185,31 @@ BlobCmd (UINT8 sub, CONST UINT8 *pay, UINT32 paylen,
   return EFI_SUCCESS;
 }
 
+/* Stat the "/smbios" blob (sub 0x08) WITHOUT opening a session.  The patched
+   BMC handler reports the table already persisted at /var/lib/smbios/smbios2
+   as committed, with a CRC of the stored table payload in the stat metadata
+   (computed with this same GenCrc).  We skip the push only when that CRC equals
+   the CRC of the table we just built — so any hardware change (DIMM/CPU/FRU)
+   alters the table and forces a fresh push.  Upstream (and a fresh BMC with no
+   smbios2) reports failure -> push.  Response data (raw[8..]):
+   blobState(2) size(4) metaLen(1) metadata(=CRC LE, 2). */
+STATIC BOOLEAN
+BmcHasSmbios (UINT16 ExpectCrc)
+{
+  EFI_STATUS s; UINT8 cc; UINT8 pay[16]; UINT32 plen = 0, rlen = 0; UINT8 rsp[16];
+  UINT16 state, mdCrc; UINT8 mdLen;
+
+  for (UINT32 i = 0; mBlobId[i]; i++) pay[plen++] = (UINT8)mBlobId[i];
+  pay[plen++] = 0;
+  s = BlobCmd (SUB_STAT, pay, plen, rsp, sizeof (rsp), &rlen, &cc);
+  if (EFI_ERROR (s) || cc != 0 || rlen < 9) return FALSE;
+  state = (UINT16)(rsp[0] | ((UINT16)rsp[1] << 8));
+  mdLen = rsp[6];                              /* rsp[2..5] = size (unused) */
+  if (!(state & BLOB_STATE_COMMITTED) || mdLen < 2) return FALSE;
+  mdCrc = (UINT16)(rsp[7] | ((UINT16)rsp[8] << 8));
+  return (BOOLEAN)(mdCrc == ExpectCrc);
+}
+
 STATIC EFI_STATUS
 SendViaBlob (UINT8 *Buf, UINT32 Len)
 {
@@ -269,7 +303,36 @@ STATIC EFI_GUID mSmbios2TableGuid = {
   { 0x9A, 0x16, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D }
 };
 
-/* Build [synthesized SMBIOS3 entry point "_SM3_"][structure table].
+/* Write a 24-byte synthesized SMBIOS3 "_SM3_" entry point at p, describing a
+   structure table of TableLen bytes.  smbios-mdr's checkSMBIOSVersion() scans
+   the whole stored buffer for an "_SM_"/"_SM3_" anchor and reads only the
+   major/minor from it — it does NOT use the table address.  TableAddress is
+   therefore set to 0 here. */
+STATIC VOID
+WriteSm3Ep (UINT8 *p, UINT32 TableLen, UINT8 Maj, UINT8 Min)
+{
+  p[0]='_'; p[1]='S'; p[2]='M'; p[3]='3'; p[4]='_';
+  p[5]=0;             /* checksum (unused by smbios-mdr) */
+  p[6]=24;            /* EntryPointLength */
+  p[7]=Maj; p[8]=Min;
+  p[9]=0;             /* DocRev */
+  p[10]=1;            /* EntryPointRevision */
+  p[11]=0;            /* Reserved */
+  p[12]=(UINT8)TableLen; p[13]=(UINT8)(TableLen>>8);
+  p[14]=(UINT8)(TableLen>>16); p[15]=(UINT8)(TableLen>>24);
+  p[16]=0; p[17]=0; p[18]=0; p[19]=0; p[20]=0; p[21]=0; p[22]=0; p[23]=0;
+}
+
+/* Build [SMBIOS structure table (Type 0 .. Type 127)][synthesized "_SM3_"
+   entry point AT THE END].  This exact layout is required by smbios-mdr:
+   - its structure walk (getSMBIOSTypePtr) starts at byte 0, so the table MUST
+     begin there or Type 0 (BIOS Information / version) is skipped -> version
+     reads back null;
+   - BUT checkSMBIOSVersion() rejects the whole table ("Unsupported SMBIOS
+     table version") unless an "_SM_"/"_SM3_" anchor exists somewhere in the
+     buffer.
+   Putting the entry point at the END satisfies both (validated live: the BMC
+   then reports BIOS version correctly).  A leading entry point breaks Type 0.
    Primary source: EFI_SMBIOS_PROTOCOL (available from early DXE).
    Fallback B: gEfiSmbios3TableGuid (SMBIOS3 entry point in config table).
    Fallback C: gEfiSmbiosTableGuid  (SMBIOS2 entry point — common on AMI).
@@ -298,19 +361,16 @@ BuildBlob (UINT8 **Out, UINT32 *OutLen)
     if (total && cnt) {
       maj = Smbios->MajorVersion; min = Smbios->MinorVersion;
       if (maj != 3 || min == 1) { maj = 3; min = 3; }
-      b = AllocatePool (epLen + total);
+      b = AllocatePool (total + epLen);
       if (!b) return EFI_OUT_OF_RESOURCES;
-      b[0]='_'; b[1]='S'; b[2]='M'; b[3]='3'; b[4]='_';
-      b[5]=0; b[6]=(UINT8)epLen; b[7]=maj; b[8]=min; b[9]=0; b[10]=1; b[11]=0;
-      b[12]=(UINT8)total; b[13]=(UINT8)(total>>8); b[14]=(UINT8)(total>>16); b[15]=(UINT8)(total>>24);
-      b[16]=(UINT8)epLen; b[17]=0; b[18]=0; b[19]=0; b[20]=0; b[21]=0; b[22]=0; b[23]=0;
-      off = epLen;
+      off = 0;
       h = SMBIOS_HANDLE_PI_RESERVED;
       while (Smbios->GetNext (Smbios, &h, NULL, &rec, NULL) == EFI_SUCCESS) {
         UINT32 l = SmbiosRecLen ((UINT8 *)rec);
         CopyMem (b + off, rec, l); off += l;
       }
-      *Out = b; *OutLen = epLen + total;
+      WriteSm3Ep (b + total, total, maj, min);
+      *Out = b; *OutLen = total + epLen;
       return EFI_SUCCESS;
     }
   }
@@ -360,14 +420,11 @@ BuildBlob (UINT8 **Out, UINT32 *OutLen)
 
   if (!total || !tbl) return EFI_NOT_FOUND;
 
-  b = AllocatePool (epLen + total);
+  b = AllocatePool (total + epLen);
   if (!b) return EFI_OUT_OF_RESOURCES;
-  b[0]='_'; b[1]='S'; b[2]='M'; b[3]='3'; b[4]='_';
-  b[5]=0; b[6]=(UINT8)epLen; b[7]=maj; b[8]=min; b[9]=0; b[10]=1; b[11]=0;
-  b[12]=(UINT8)total; b[13]=(UINT8)(total>>8); b[14]=(UINT8)(total>>16); b[15]=(UINT8)(total>>24);
-  b[16]=(UINT8)epLen; b[17]=0; b[18]=0; b[19]=0; b[20]=0; b[21]=0; b[22]=0; b[23]=0;
-  CopyMem (b + epLen, tbl, total);
-  *Out = b; *OutLen = epLen + total;
+  CopyMem (b, tbl, total);
+  WriteSm3Ep (b + total, total, maj, min);
+  *Out = b; *OutLen = total + epLen;
   return EFI_SUCCESS;
 }
 
@@ -382,7 +439,8 @@ BuildBlob (UINT8 **Out, UINT32 *OutLen)
    0x77 = SMBIOS found (blob built)
    0x78 = no SMBIOS
    0x79 = push OK
-   0x7A = push fail */
+   0x7A = push fail
+   0x7B = skipped — BMC already holds a byte-identical table (CRC match) */
 
 STATIC VOID DoPush (VOID)
 {
@@ -390,6 +448,10 @@ STATIC VOID DoPush (VOID)
   UINT8 *Buf = NULL; UINT32 Len = 0;
   if (EFI_ERROR (BuildBlob (&Buf, &Len))) { Post (0x78); return; }
   Post (0x77);
+  /* Build first, then skip the KCS transfer only if the BMC already holds a
+     byte-identical table (matching CRC).  A hardware change alters the table,
+     so the CRC differs and we re-push. */
+  if (BmcHasSmbios (GenCrc (Buf, Len))) { mDone = TRUE; FreePool (Buf); Post (0x7B); return; }
   if (!EFI_ERROR (SendViaBlob (Buf, Len))) { mDone = TRUE; Post (0x79); }
   else Post (0x7A);
   FreePool (Buf);
