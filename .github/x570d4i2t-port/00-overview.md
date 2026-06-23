@@ -32,15 +32,15 @@ continuing the work in a new agent session.
 | IPMI `dev_id.json` | ✅ populated with the live BMC's actual values (mfg_id 0x00C1D6, prod_id 0x1003, dev_id 0x20) |
 | `obmc-console.conf` (SOL) | ✅ removed — `meta-phosphor` already defaults to COM1 (`lpc-address=0x3f8`, `sirq=4`). Custom override was redundant |
 | `led-group-config.json` + bbappend | ✅ standard `bmc_booted` / `system_fault` groups; DTS uses legacy LED node names (`heartbeat`, `system-fault`) |
-| AMD APML / SB-RMI support | ✅ DTS adds `sbrmi@3c` on i2c1; kernel `.cfg` enables `CONFIG_SENSORS_SBRMI=m` (NOT SBTSI — would conflict with W83773G at 0x4c) |
-| Entity-manager JSON | ✅ ships `x570d4i2t.json` with all 13 voltage rails, W83773G, SB-RMI, 3 fans, PCA9545 mux, and a Stepwise fan curve matching the stock BMC's captured open-loop table (30°C→20% ... 100°C→100%) |
+| AMD APML / SB-RMI support | ❌ REMOVED — confirmed unusable (2026-06): i2c2 0x3C NAKs CTRL/STATUS + the MP1 power mailbox, driver probe fails -EIO, stock firmware ships `SUPPORT_APML_IFC=0`, AM4/X570 silicon doesn't expose the EPYC SB-RMI power mailbox. DTS node + kernel config dropped. No CPU-power / power-cap source exists on this board (PSU is non-standard PMBus the OEM never read; ADCs are voltage-only) |
+| Entity-manager JSON | ✅ ships `x570d4i2t.json` with all 13 voltage rails, W83773G, 3 fans, PCA9545 mux, and a Stepwise fan curve matching the stock BMC's captured open-loop table (30°C→20% ... 100°C→100%) |
 | NVMe sideband documented | ✅ PCA9545 mux channel 1 documented as the M.2/NVMe-MI path. Live NVMe sensor instantiation deferred to runtime (Type/Address depend on actual drive) |
 | `phosphor-power` regulator config | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no VRM/regulator I2C config; voltages are read via the AST2500 internal ADC only |
 | `bios-update` in-band hook | ❌ skipped — confirmed unnecessary. Stock BMC firmware has no `BMC_PCH_BIOS_CS_N` SPI-mux GPIO; the X570D4I-2T uses CPU PSP for in-band BIOS flash, not BMC-mediated SPI |
 | External SPI flash + first boot | ✅ done — multiple successful flash + boot cycles via Redfish UpdateService HttpPushUri |
 | NCT6779 SuperIO bridge daemon | ✅ added — see [06-post-flash-discoveries.md](06-post-flash-discoveries.md). 8 ExternalSensor + shell daemon publishes SYSTIN/CPUTIN/etc. into dbus |
-| SBRMI CPU temp | ❌ chip ACKs ping but driver `sbrmi_enable_alert()` write NAKed; needs driver patch or shell daemon |
-| PSU PMBus sensors | ❌ PWS-505P-1H is non-standard PMBus (auto-incrementing pointer); needs custom shell daemon analogous to NCT6779 bridge |
+| SBRMI CPU temp / power | ❌ DEAD END (removed). i2c2 0x3C NAKs CTRL/STATUS + MP1 mailbox; OEM ships `SUPPORT_APML_IFC=0`; AM4 silicon limitation. Not driver-fixable. CPU Temp comes from the W83773G @ 0x4C instead |
+| PSU PMBus sensors / power | ❌ DEAD END. PWS-505P-1H is non-standard PMBus (generic driver fails capability ID; raw words don't decode as LINEAR) and the stock MegaRAC SDR has NO PSU power/volt/current sensor — the OEM never read it either. No power-monitoring source; use an external smart PDU for wall watts |
 | BMC fan PWM control | ❌ AST2500 PWM=255 doesn't move physical fans — board likely routes FAN1/2/3 PWM through host-owned SuperIO, not BMC |
 
 ## Provided references

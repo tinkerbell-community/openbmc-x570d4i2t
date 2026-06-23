@@ -247,13 +247,6 @@
 	 *    BMC binds nct6775-i2c read-only and surfaces SYSTIN, CPUTIN,
 	 *    AUXTIN, the X570 chipset temp (PCH_CHIP_TEMP, == "X570 Temp" on
 	 *    the stock MegaRAC), voltages, and fan RPMs into hwmon.
-	 *
-	 * NOTE: AMI's IPMI.conf labels APML_BUS_NUMBER=1, but on the
-	 * X570D4I-2T physical wiring the AMD SB-RMI is actually accessible
-	 * from the BMC on i2c2 (confirmed by i2cdetect + reading SB-RMI
-	 * Version reg 0x20 = 0x17, AMD Family 19h). MegaRAC's bus numbers
-	 * follow its own legacy convention, not the Linux aspeed-i2c probe
-	 * order. See sbrmi@3c under &i2c2 below.
 	 */
 	status = "okay";
 
@@ -270,17 +263,21 @@
 
 &i2c2 {
 	/*
-	 * AMD SB-RMI (APML) SMBus. Confirmed by reading SB-RMI Version reg
-	 * 0x20 = 0x17 (Family 19h). The bus is also reported by the playbook
-	 * as "PSU_SMB1" via AMI's IPMI.conf, but the actual device on the
-	 * production board at i2c2 0x3C is the CPU's APML slave, not a PSU.
+	 * PSU_SMB1 SMBus (AMI IPMI.conf "PSU_SMB1"). Two devices live here, but
+	 * NEITHER is usable, so no child nodes are instantiated:
+	 *  - 0x38: Supermicro PWS-505P-1H PSU. Spec'd PMBus, but non-standard:
+	 *    the Linux generic `pmbus` driver fails capability ID, raw reads do
+	 *    not decode as LINEAR, and the stock MegaRAC SDR contains NO PSU
+	 *    power/voltage/current sensor (it never read PSU telemetry either).
+	 *  - 0x3C: AMD SB-RMI (APML). Version reg 0x20 reads 0x17, but the
+	 *    SB-RMI CTRL/STATUS regs and the MP1 power mailbox NAK all BMC
+	 *    access (driver probe fails -EIO). The stock firmware ships with
+	 *    SUPPORT_APML_IFC=0 — the OEM disabled APML, and AM4/X570 silicon
+	 *    does not expose the EPYC-class SB-RMI power mailbox to the BMC.
+	 * Net: no power telemetry or power cap source exists on this board.
+	 * The bus is left enabled for manual i2c access / future probing.
 	 */
 	status = "okay";
-
-	sbrmi@3c {
-		compatible = "amd,sbrmi";
-		reg = <0x3c>;
-	};
 };
 
 &i2c3 {

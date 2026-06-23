@@ -16,11 +16,11 @@ W83773G hardware monitor). Notable differences:
 
  - Three fan headers (FAN1..FAN3, all 4-pin) instead of six. Verified
    against the stock BMC's /api/asrr/settings/getsupportfan endpoint.
- - AMD SB-RMI (APML) interface exposed on i2c1 alongside the W83773G.
-   Confirmed against the stock AMI firmware's IPMI.conf
-   (APML_BUS_NUMBER=1) — gives the BMC direct access to host CPU
-   thermal and power telemetry. SB-TSI is NOT enabled because it would
-   conflict with the W83773G chip already at i2c1:0x4c.
+ - AMD SB-RMI (APML) is present at i2c2 0x3C but UNUSABLE and not
+   instantiated (it NAKs the BMC's CTRL/STATUS + MP1 power mailbox; the
+   stock firmware disables APML via SUPPORT_APML_IFC=0; AM4/X570 silicon
+   does not expose the EPYC SB-RMI power mailbox). SB-TSI is likewise not
+   enabled (it would collide with the W83773G already at i2c1:0x4c).
 
 The LED block uses legacy node-name labelling (heartbeat, system-fault)
 to match the rest of the ASRock OpenBMC family and allow the shared

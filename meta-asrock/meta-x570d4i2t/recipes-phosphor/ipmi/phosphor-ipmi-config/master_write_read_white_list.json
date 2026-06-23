@@ -9,15 +9,7 @@
             "commandMask": "0xFF"
         },
         {
-            "Description": "Allow AMD SBRMI (bus 1, 0x3C)",
-            "busId": "0x01",
-            "slaveAddr": "0x3C",
-            "slaveAddrMask": "0x00",
-            "command": "0x00",
-            "commandMask": "0xFF"
-        },
-        {
-            "Description": "Allow PSU SMBus (bus 2, 0x38)",
+            "Description": "Allow PSU SMBus (bus 2, 0x38) — non-standard PMBus, kept for manual probing",
             "busId": "0x02",
             "slaveAddr": "0x38",
             "slaveAddrMask": "0x00",

@@ -282,7 +282,7 @@ Extracting the stock BMC image (`X570D4I-2T_1.90.00.ima`, 64 MB) yielded:
   - `SECONDARY_IPMB_I2C_BUS_NUM=3` (i2c-3)
   - `SMBUS_BUS_NUM=6` (i2c-6 — general SMBus, host-shared)
   - `EEPROM_I2C_BUS_NUM=7` (i2c-7 — FRU + MAC EEPROM, matches X570D4U DTS)
-  - `APML_BUS_NUMBER=1`, `APML2_BUS_NUMBER=1` (i2c-1 — AMD CPU SB-RMI/SB-TSI, shares bus with W83773G)
+  - `APML_BUS_NUMBER=1`, `APML2_BUS_NUMBER=1` — but `SUPPORT_APML_IFC=0`, i.e. the OEM has APML **disabled**. The SB-RMI slave is physically at i2c-2 0x3C, not i2c-1, and NAKs BMC mailbox access; unusable for CPU power/thermal (see [06-post-flash-discoveries.md](06-post-flash-discoveries.md))
   - `SOL_IFC_PORT=/dev/ttyS3` (BMC's serial3 wired to host COM1 via LPC/VUART)
 - **`/info/X570D4I-2T_K5.PRJ`** — AMI MegaRAC SPX 4.0 build manifest:
   - Kernel: 5.4.99-ami (uImage at IMA offset `0x1740040`, load `0x80008000`)

@@ -118,11 +118,14 @@ Discovery procedure: see [02-bmc-discovery.md](02-bmc-discovery.md) option A —
 Also evaluate adding:
 
 ```
-# If host SBRMI is wired up for APML (AMD telemetry)
-CONFIG_SENSORS_SBRMI=m
 # Always-useful debug
 CONFIG_DEBUG_FS=y
 ```
+
+> AMD SB-RMI / APML (`CONFIG_AMD_SBRMI_*`) was tried and REMOVED — the CPU's
+> SB-RMI mailbox NAKs all BMC access on this board, the OEM ships
+> `SUPPORT_APML_IFC=0`, and AM4/X570 silicon doesn't expose the EPYC power
+> mailbox. See [06-post-flash-discoveries.md](06-post-flash-discoveries.md).
 
 ### 3. `linux-aspeed_%.bbappend` — pull in the new DTS patch
 

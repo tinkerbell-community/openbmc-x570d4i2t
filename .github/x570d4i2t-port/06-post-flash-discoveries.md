@@ -17,7 +17,7 @@ NCT6779 hwmon index → label (verified at runtime via `temp*_label` files):
 | Index | Label | Notes |
 |---|---|---|
 | temp1 | SYSTIN | works |
-| temp2 | CPUTIN | reads saturated 97.5°C — likely unwired (real CPU temp = SBRMI) |
+| temp2 | CPUTIN | reads saturated 97.5°C — likely unwired (real CPU temp = W83773G @ 0x4C; SBRMI is dead, see below) |
 | temp3 | AUXTIN0 | reads saturated 99°C — unwired |
 | temp4 | AUXTIN1 | real ~44°C |
 | temp5 | AUXTIN2 | real ~41°C |
@@ -86,16 +86,27 @@ instantiate-fails** — leaves a "Failed to instantiate 'pmbus' at address '56'"
 line in psusensor logs per restart. Decision: leave it in for future
 custom-driver work; document the limitation.
 
-## SBRMI driver fails probe — chip ACKs presence but NAKs alert-enable write
+## SBRMI / APML — DEAD END, REMOVED (2026-06)
 
-DT-instantiated `sbrmi@3c` on i2c-2 (moved from i2c-1 — the host's NCT6779 is
-the actual i2c-1:0x3c at S0). After host POST, `i2cdetect -y -r 2` shows 0x3c
-respond. Driver probe fails because `sbrmi_enable_alert()` writes to reg 0x40
-and gets NAKed. Manual rebind also fails (`-EBUSY`/`-EIO`).
+DT-instantiated `sbrmi@3c` on i2c-2. After host POST, `i2cdetect -y -r 2` shows
+0x3c respond and reg 0x20 reads 0x17, but the driver probe (`drivers/misc/amd-sbi`)
+fails `-EIO`. Re-investigated with the host fully powered on:
 
-Status: real CPU temp via SBRMI is unavailable without a driver patch.
-Options not yet tried: shim driver that skips alert-enable, or shell daemon
-reading SBRMI via raw i2c (it ACKs presence ping).
++ The SB-RMI `CTRL` (0x01) and `STATUS` (0x02) registers **NAK reads**, and
+  **all writes NAK** — so `sbrmi_enable_alert()` and the MP1 power mailbox
+  (`READ_PKG_PWR_CONSUMPTION` / `WRITE_PKG_PWR_LIMIT`) cannot run. A raw i2c
+  replay of the mailbox sequence NAKs at the first inbound-message write.
++ The **stock OEM firmware ships `SUPPORT_APML_IFC=0`**
+  (`.../defconfig/BMC1/1U2-X570/2T/IPMI.conf`) — the OEM disabled APML, and the
+  stock SDR has no CPU-power sensor either.
++ Root cause: full SB-RMI power telemetry/cap is an EPYC SP3/SP5 feature; the
+  AM4/X570 SMU does not expose it to the BMC, and no BIOS module enables it
+  (zero `apml`/`sbrmi` strings across the whole AMI firmware).
+
+Decision: **removed** the `sbrmi@3c` DTS node, `CONFIG_AMD_SBRMI_*`, and the
+(wrong-bus) SBRMI master-write-read whitelist entry. CPU Temp comes from the
+W83773G @ i2c1 0x4C, not SB-RMI. There is **no CPU-power / power-cap source** on
+this board (PSU is non-standard PMBus the OEM never read; ADCs are voltage-only).
 
 ## i2c-6 0x60 = chipset-internal device (likely AMD FCH)
 
@@ -274,4 +285,4 @@ stock. Chassis fans (FAN1/2/3 headers) are the AST2500-side tachs, separate.
 | AST2500 iio_hwmon ADCs | 13 | 3VSB, 5VSB, VCPU, VSOC, VCCM, APU_VDDP, PM_VDD_CLDO, PM_VDDCR_S5, PM_VDDCR, BAT, 3V, 5V, 12V |
 | W83773G hwmon | 2 | CPU Temp, X570 Temp |
 | NCT6779 bridge (ExternalSensor) | 8 | SYSTIN, CPUTIN, AUXTIN, X570_Temp, PCH_CPU_Temp, PCH_MCH_Temp, SuperIO_Fan_1, SuperIO_Fan_2 |
-| Total | 23 | (CPU_Temp from SBRMI broken; PSU sensors require custom daemon) |
+| Total | 23 | (CPU_Temp is the W83773G, not SBRMI — SB-RMI removed as unusable; no PSU power source) |
